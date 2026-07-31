@@ -31,12 +31,11 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install dependencies
-        run: |
-          if ! npm ci --no-audit --no-fund 2> npm-ci-error.log; then
-            echo "::warning::npm ci failed, falling back to npm install: $(tr '\n' ' ' < npm-ci-error.log | head -c 900)"
-            npm install --no-audit --no-fund
-          fi
+      # npm install, not npm ci: @tailwindcss/oxide-wasm32-wasi pulls in
+      # @emnapi/core and @emnapi/runtime only when resolved on Linux, so a
+      # lockfile generated on Windows is always "out of sync" here and npm ci
+      # refuses to run. Regenerate the lockfile on Linux to switch to npm ci.
+      - run: npm install --no-audit --no-fund
 
       - run: npm run build
 
