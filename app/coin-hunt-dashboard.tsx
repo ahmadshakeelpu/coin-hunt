@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Kline = [number, string, string, string, string, string, number, ...unknown[]];
 type Ticker = { symbol: string; lastPrice: string; priceChangePercent: string; quoteVolume: string };
@@ -34,6 +34,14 @@ type ScanResponse = {
   durationMs: number;
   settings: { shaLength1: number; shaLength2: number; rsiLength: number };
 };
+/** Streamed values that replace the scanned snapshot as they arrive. */
+type LiveTick = {
+  price: number;
+  change24h: number;
+  quoteVolume: number;
+  dir: "up" | "down" | null;
+  at: number;
+};
 
 // Ordered fastest-first. data-api.binance.vision stays reachable in regions
 // where the main host is restricted, but responds far slower, so it is a
@@ -43,7 +51,16 @@ const API_HOSTS = [
   "https://api-gcp.binance.com",
   "https://data-api.binance.vision",
 ];
+const STREAM_HOST = "wss://stream.binance.com:9443/stream";
+// Binance has no circulating supply, so market cap comes from CoinGecko.
+const SUPPLY_URL =
+  "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=false";
 const REQUEST_TIMEOUT_MS = 12_000;
+// Indicators only move when a candle closes, so rescanning faster than this
+// spends rate limit for nothing. Prices stay current over the socket.
+const RESCAN_INTERVAL_MS = 180_000;
+const FLUSH_INTERVAL_MS = 400;
+const FLASH_MS = 900;
 const SHA_LENGTH_1 = 10;
 const SHA_LENGTH_2 = 10;
 const RSI_LENGTH = 14;
@@ -77,6 +94,26 @@ async function connectToBinance() {
   }
   const reason = lastError instanceof Error ? lastError.message : "connection blocked";
   throw new Error(`Binance public data is unavailable from this network (${reason}). No API key is required.`);
+}
+
+/**
+ * Circulating supply per base asset, so market cap can be recomputed from the
+ * streamed price. Symbols collide across coins, so the highest-cap match wins
+ * and anything outside the top 250 is left without a market cap.
+ */
+async function fetchSupplyMap(): Promise<Record<string, number>> {
+  const supply: Record<string, number> = {};
+  try {
+    const rows = await requestJson<Array<{ symbol?: string; circulating_supply?: number }>>(SUPPLY_URL);
+    for (const row of rows) {
+      const asset = String(row.symbol ?? "").toUpperCase();
+      const circulating = Number(row.circulating_supply);
+      if (asset && circulating > 0 && !(asset in supply)) supply[asset] = circulating;
+    }
+  } catch {
+    // Market cap is supplementary; a failure here must not fail the scan.
+  }
+  return supply;
 }
 
 function ema(values: number[], length: number) {
@@ -203,8 +240,13 @@ const formatPrice = (value: number) => {
   if (value >= 1) return value.toLocaleString("en-US", { maximumFractionDigits: 4 });
   return value.toLocaleString("en-US", { maximumSignificantDigits: 5 });
 };
-const formatVolume = (value: number) =>
-  value >= 1e9 ? `$${(value / 1e9).toFixed(2)}B` : `$${(value / 1e6).toFixed(1)}M`;
+const formatUsd = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return "—";
+  if (value >= 1e12) return `$${(value / 1e12).toFixed(2)}T`;
+  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
+  if (value >= 1e6) return `$${(value / 1e6).toFixed(1)}M`;
+  return `$${(value / 1e3).toFixed(0)}K`;
+};
 
 function Candle({ bull }: { bull: boolean }) {
   return <span className={`candle ${bull ? "bull" : "bear"}`}><i />{bull ? "Green" : "Red"}</span>;
@@ -222,10 +264,18 @@ function Rsi({ value, min, max }: { value: number; min: number; max: number }) {
 
 export function CoinHuntDashboard() {
   const [data, setData] = useState<ScanResponse | null>(null);
+  const [live, setLive] = useState<Record<string, LiveTick>>({});
+  const [supply, setSupply] = useState<Record<string, number>>({});
+  const [streaming, setStreaming] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [matchesOnly, setMatchesOnly] = useState(false);
+
+  // Frames arrive about once a second per symbol. Buffer them and flush on a
+  // timer so 25 streams do not drive 25 renders a second.
+  const pendingRef = useRef<Record<string, LiveTick>>({});
+  const lastPriceRef = useRef<Record<string, number>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -233,7 +283,9 @@ export function CoinHuntDashboard() {
     try {
       // Binance rejects datacenter IPs with a 403, so the scan has to run from
       // the visitor's own connection rather than from a server.
-      setData(await runBrowserScan());
+      const [scan, supplyMap] = await Promise.all([runBrowserScan(), fetchSupplyMap()]);
+      setData(scan);
+      setSupply(supplyMap);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load the market scan.");
     } finally {
@@ -243,16 +295,82 @@ export function CoinHuntDashboard() {
 
   useEffect(() => {
     load();
-    const timer = window.setInterval(load, 60_000);
+    const timer = window.setInterval(load, RESCAN_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [load]);
 
+  // Stream only the symbols on screen; the all-market feed is megabytes a second.
+  useEffect(() => {
+    const symbols = data?.coins.map((coin) => coin.symbol) ?? [];
+    if (!symbols.length) return;
+    const streams = symbols.map((symbol) => `${symbol.toLowerCase()}@ticker`).join("/");
+    const socket = new WebSocket(`${STREAM_HOST}?streams=${streams}`);
+    socket.onopen = () => setStreaming(true);
+    socket.onclose = () => setStreaming(false);
+    socket.onerror = () => setStreaming(false);
+    socket.onmessage = (event) => {
+      try {
+        const frame = JSON.parse(String(event.data)) as { data?: { s?: string; c?: string; P?: string; q?: string } };
+        const tick = frame.data;
+        if (!tick?.s) return;
+        const price = Number(tick.c);
+        if (!Number.isFinite(price)) return;
+        const previous = lastPriceRef.current[tick.s];
+        lastPriceRef.current[tick.s] = price;
+        pendingRef.current[tick.s] = {
+          price,
+          change24h: Number(tick.P),
+          quoteVolume: Number(tick.q),
+          dir: previous === undefined || price === previous ? null : price > previous ? "up" : "down",
+          at: Date.now(),
+        };
+      } catch {
+        // Ignore frames that are not ticker payloads.
+      }
+    };
+    return () => socket.close();
+  }, [data]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const pending = pendingRef.current;
+      pendingRef.current = {};
+      const arrived = Object.keys(pending);
+      setLive((previous) => {
+        const next = { ...previous, ...pending };
+        let changed = arrived.length > 0;
+        const now = Date.now();
+        for (const symbol of Object.keys(next)) {
+          if (next[symbol].dir && now - next[symbol].at > FLASH_MS) {
+            next[symbol] = { ...next[symbol], dir: null };
+            changed = true;
+          }
+        }
+        return changed ? next : previous;
+      });
+    }, FLUSH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Row order is fixed by the scan so live prices never reshuffle the table.
   const coins = useMemo(() => {
     const q = query.trim().toUpperCase();
-    return (data?.coins ?? []).filter(
-      (coin) => (!matchesOnly || coin.match) && (!q || coin.symbol.includes(q) || coin.baseAsset.includes(q)),
-    );
-  }, [data, matchesOnly, query]);
+    return (data?.coins ?? [])
+      .filter((coin) => (!matchesOnly || coin.match) && (!q || coin.symbol.includes(q) || coin.baseAsset.includes(q)))
+      .map((coin) => {
+        const tick = live[coin.symbol];
+        const price = tick?.price ?? coin.price;
+        const circulating = supply[coin.baseAsset];
+        return {
+          ...coin,
+          price,
+          change24h: tick?.change24h ?? coin.change24h,
+          quoteVolume: tick?.quoteVolume ?? coin.quoteVolume,
+          marketCap: circulating ? circulating * price : 0,
+          dir: tick?.dir ?? null,
+        };
+      });
+  }, [data, live, matchesOnly, query, supply]);
 
   const matches = data?.coins.filter((coin) => coin.match).length ?? 0;
   const updated = data ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
@@ -261,7 +379,9 @@ export function CoinHuntDashboard() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">⌁</span> Coin Hunt <span className="brand-sub">BINANCE SPOT SCREENER</span></div>
-        <div className="live-pill"><span className="live-dot" /> LIVE MARKET DATA</div>
+        <div className={`live-pill ${streaming ? "" : "offline"}`}>
+          <span className="live-dot" /> {streaming ? "LIVE — STREAMING" : "CONNECTING…"}
+        </div>
       </header>
 
       <main className="main">
@@ -271,7 +391,7 @@ export function CoinHuntDashboard() {
             <h1>Find alignment.<br />Before the crowd.</h1>
             <p>Scanning liquid Binance Spot USDT pairs using closed candles. Exact signals require three bullish Smoothed Heikin Ashi timeframes and both RSI windows to align.</p>
           </div>
-          <button className="refresh-button" onClick={load} disabled={loading}>{loading ? "Scanning…" : "↻ Run scan"}</button>
+          <button className="refresh-button" onClick={load} disabled={loading}>{loading ? "Scanning…" : "↻ Rescan signals"}</button>
         </section>
 
         <section className="rule-strip" aria-label="Active signal rules">
@@ -295,15 +415,17 @@ export function CoinHuntDashboard() {
             <div className="error"><strong>Scan could not complete</strong>{error}<br /><button className="filter-button" onClick={load} style={{ marginTop: 16 }}>Try again</button></div>
           ) : (
             <table>
-              <thead><tr><th>Asset</th><th>Price</th><th>24H</th><th>1D SHA</th><th>1H SHA</th><th>30m SHA</th><th>1H RSI</th><th>30m RSI</th><th>Signal</th><th></th></tr></thead>
+              <thead><tr><th>Asset</th><th>Price</th><th>24H</th><th>Market cap</th><th>24H volume</th><th>1D SHA</th><th>1H SHA</th><th>30m SHA</th><th>1H RSI</th><th>30m RSI</th><th>Signal</th><th></th></tr></thead>
               <tbody>
                 {loading && !data ? Array.from({ length: 7 }, (_, index) => (
-                  <tr className="skeleton-row" key={index}>{Array.from({ length: 10 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
+                  <tr className="skeleton-row" key={index}>{Array.from({ length: 12 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
                 )) : coins.map((coin) => (
                   <tr key={coin.symbol}>
                     <td><div className="coin"><span className="coin-icon">{coin.baseAsset.slice(0, 2)}</span><div><div className="coin-name">{coin.baseAsset}</div><div className="coin-pair">{coin.symbol}</div></div></div></td>
-                    <td className="mono">${formatPrice(coin.price)}<div className="coin-pair">{formatVolume(coin.quoteVolume)}</div></td>
+                    <td className={`mono tick ${coin.dir ?? ""}`}>${formatPrice(coin.price)}</td>
                     <td className={`mono ${coin.change24h >= 0 ? "positive" : "negative"}`}>{coin.change24h >= 0 ? "+" : ""}{coin.change24h.toFixed(2)}%</td>
+                    <td className="mono">{formatUsd(coin.marketCap)}</td>
+                    <td className="mono">{formatUsd(coin.quoteVolume)}</td>
                     <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
                     <td><Rsi value={coin.rsi1h} min={55} max={57} /></td><td><Rsi value={coin.rsi30m} min={56} max={58} /></td>
                     <td><span className={coin.match ? "match-badge" : "near-badge"}>{coin.match ? "Exact match" : `${coin.score}/5 aligned`}</span></td>
@@ -317,8 +439,8 @@ export function CoinHuntDashboard() {
         </div>
 
         <div className="footnote">
-          <span>Last scan {updated} · {data?.scanned ?? 0} liquid USDT pairs · {data?.durationMs ?? 0}ms</span>
-          <span>Official Binance Spot public data API · SHA: double EMA {data?.settings.shaLength1 ?? 10}/{data?.settings.shaLength2 ?? 10} · Closed candles only · Research tool, not financial advice.</span>
+          <span>Signals rescanned {updated} · {data?.scanned ?? 0} liquid USDT pairs · {data?.durationMs ?? 0}ms · prices stream live</span>
+          <span>Binance Spot API and WebSocket · market cap from CoinGecko supply × live price · SHA: double EMA {data?.settings.shaLength1 ?? 10}/{data?.settings.shaLength2 ?? 10} · Closed candles only · Research tool, not financial advice.</span>
         </div>
       </main>
     </div>

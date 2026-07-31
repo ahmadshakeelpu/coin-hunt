@@ -24,6 +24,33 @@ with a partial score so you can see how close they are.
 Stablecoin and fiat bases are excluded, and only the top pairs by 24h quote
 volume are scanned.
 
+## Live updates
+
+Price, 24h change and 24h volume stream over Binance's WebSocket feed and update
+about once a second with no interaction. Only the symbols on screen are
+subscribed — the all-market feed is megabytes a second. Frames are buffered and
+flushed on a timer so 25 streams do not drive 25 renders a second, and a price
+cell tints green or red as it moves.
+
+Row order is fixed by the scan so live prices never reshuffle the table while
+you are reading it.
+
+The indicators are not streamed. Smoothed Heikin Ashi and RSI only change when a
+candle closes, so they refresh over REST every 3 minutes; rescanning faster
+spends rate limit for nothing.
+
+## Market cap
+
+Binance does not publish circulating supply, so market cap cannot come from the
+same source as everything else. Supply is read once per scan from CoinGecko's
+top 250 by market cap, and market cap is then recomputed locally as
+`supply × live price` so it moves with the stream.
+
+Two consequences worth knowing: coins outside CoinGecko's top 250 show `—`
+rather than a wrong number, and because ticker symbols collide across coins the
+highest-market-cap match wins, which is a heuristic rather than an exact
+mapping.
+
 ## Why the scan runs in the browser
 
 Binance's WAF returns `403` to requests from datacenter IP ranges, which covers

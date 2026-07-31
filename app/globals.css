@@ -36,7 +36,10 @@ button { cursor: pointer; }
 }
 .brand-sub { color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: .04em; margin-left: 3px; }
 .live-pill { display: flex; align-items: center; gap: 8px; color: #b7bdb5; font-size: 12px; }
-.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 5px rgba(92,225,163,.08); }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 5px rgba(92,225,163,.08); animation: pulse 2s ease-in-out infinite; }
+.live-pill.offline { color: #6f766e; }
+.live-pill.offline .live-dot { background: #575f57; box-shadow: 0 0 0 5px rgba(255,255,255,.03); animation: none; }
+@keyframes pulse { 50% { opacity: .35; } }
 
 .main { width: min(1440px, 92vw); margin: 0 auto; padding: 48px 0 72px; }
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 32px; align-items: end; margin-bottom: 34px; }
@@ -74,8 +77,8 @@ h1 { font-size: clamp(38px, 5.5vw, 76px); line-height: .95; letter-spacing: -.07
 .filter-button { background: #0d100e; border: 1px solid var(--line); color: #aeb4ad; border-radius: 8px; padding: 9px 12px; }
 .filter-button.active { border-color: #596820; color: var(--lime); background: rgba(201,242,39,.05); }
 
-.table-wrap { border: 1px solid var(--line); border-radius: 13px; overflow: hidden; background: rgba(16,20,17,.72); }
-table { width: 100%; border-collapse: collapse; }
+.table-wrap { border: 1px solid var(--line); border-radius: 13px; overflow-x: auto; background: rgba(16,20,17,.72); }
+table { width: 100%; border-collapse: collapse; min-width: 1120px; }
 th {
   padding: 13px 18px; color: #687068; font-size: 9px; letter-spacing: .11em; text-transform: uppercase;
   font-weight: 600; text-align: left; background: #0d100e; border-bottom: 1px solid var(--line);
@@ -91,6 +94,10 @@ tbody tr:hover { background: rgba(255,255,255,.017); }
 .mono { font-family: var(--font-geist-mono); }
 .positive { color: var(--green); }
 .negative { color: var(--red); }
+/* Tints on each streamed price change, then fades back as the tick goes stale. */
+.tick { transition: color .45s ease, background-color .45s ease; border-radius: 5px; }
+.tick.up { color: var(--green); background: rgba(92,225,163,.09); }
+.tick.down { color: var(--red); background: rgba(255,118,111,.09); }
 .candle {
   display: inline-flex; align-items: center; gap: 7px; color: #9da49c; font: 11px var(--font-geist-mono);
 }
