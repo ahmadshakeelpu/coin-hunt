@@ -82,6 +82,12 @@ npm run build
 Produces a static export in `out/`. Pushing to `main` builds and publishes it to
 GitHub Pages via `.github/workflows/deploy.yml`.
 
+**Settings → Pages → Source must be "GitHub Actions".** On "Deploy from a
+branch" GitHub additionally runs Jekyll over the repo on every push, and
+whichever pipeline finishes last wins, so the site alternates between this build
+and a Jekyll render of this README. The workflow cannot fix this itself:
+changing the Pages source needs admin rights that `GITHUB_TOKEN` does not have.
+
 ## Disclaimer
 
 A research tool, not financial advice.

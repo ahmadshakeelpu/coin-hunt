@@ -20,19 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # configure-pages enables Pages but leaves an already-enabled site on
-      # branch publishing, which runs Jekyll over the repo and overwrites this
-      # deploy. Only the Pages API can move it to Actions publishing.
-      - name: Publish from Actions rather than a branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api -X PUT "repos/${{ github.repository }}/pages" -f build_type=workflow 2> pages-put.log || true
-          echo "::warning::put-stderr[$(tr '\n' ' ' < pages-put.log | head -c 300)] config[$(gh api "repos/${{ github.repository }}/pages" 2>&1 | tr -d '\n' | head -c 400)]"
-
+      # Requires Settings > Pages > Source = "GitHub Actions". On branch
+      # publishing GitHub also runs Jekyll over the repo on every push, and
+      # whichever pipeline finishes last wins, so the site flips between this
+      # build and a Jekyll render of the README. GITHUB_TOKEN cannot change
+      # that setting: the Pages API needs admin, which it does not have.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/setup-node@v4
         with:
