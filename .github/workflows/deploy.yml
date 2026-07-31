@@ -20,8 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Runs before the build so the Pages source is switched from branch
-      # publishing to Actions even if a later step fails.
+      # configure-pages enables Pages but leaves an already-enabled site on
+      # branch publishing, which runs Jekyll over the repo and overwrites this
+      # deploy. Only the Pages API can move it to Actions publishing.
+      - name: Publish from Actions rather than a branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh api -X PUT "repos/${{ github.repository }}/pages" -f build_type=workflow 2> pages-api.log; then
+            echo "::warning::could not switch Pages to Actions publishing: $(tr '\n' ' ' < pages-api.log | head -c 600)"
+          fi
+
       - uses: actions/configure-pages@v5
         with:
           enablement: true
