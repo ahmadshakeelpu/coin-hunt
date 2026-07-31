@@ -19,15 +19,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Runs before the build so the Pages source is switched from branch
+      # publishing to Actions even if a later step fails.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+
+      - name: Install dependencies
+        run: |
+          if ! npm ci --no-audit --no-fund 2> npm-ci-error.log; then
+            echo "::warning::npm ci failed, falling back to npm install: $(tr '\n' ' ' < npm-ci-error.log | head -c 900)"
+            npm install --no-audit --no-fund
+          fi
+
       - run: npm run build
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: out
