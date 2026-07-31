@@ -55,13 +55,6 @@ npm run build
 Produces a static export in `out/`. Pushing to `main` builds and publishes it to
 GitHub Pages via `.github/workflows/deploy.yml`.
 
-## Unused scaffolding
-
-This started from a Cloudflare Workers template. `worker/`, `db/`, `drizzle/`,
-`vite.config.ts`, `build/`, `.openai/`, `app/chatgpt-auth.ts` and
-`tests/rendered-html.test.mjs` are all left over from it and are not used by the
-build. They can be deleted.
-
 ## Disclaimer
 
 A research tool, not financial advice.
