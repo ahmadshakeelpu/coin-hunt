@@ -27,9 +27,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh api -X PUT "repos/${{ github.repository }}/pages" -f build_type=workflow 2> pages-api.log; then
-            echo "::warning::could not switch Pages to Actions publishing: $(tr '\n' ' ' < pages-api.log | head -c 600)"
-          fi
+          gh api -X PUT "repos/${{ github.repository }}/pages" -f build_type=workflow 2> pages-put.log || true
+          echo "::warning::put-stderr[$(tr '\n' ' ' < pages-put.log | head -c 300)] config[$(gh api "repos/${{ github.repository }}/pages" 2>&1 | tr -d '\n' | head -c 400)]"
 
       - uses: actions/configure-pages@v5
         with:
