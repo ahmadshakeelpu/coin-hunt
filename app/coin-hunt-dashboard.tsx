@@ -35,11 +35,15 @@ type ScanResponse = {
   settings: { shaLength1: number; shaLength2: number; rsiLength: number };
 };
 
+// Ordered fastest-first. data-api.binance.vision stays reachable in regions
+// where the main host is restricted, but responds far slower, so it is a
+// fallback rather than the default.
 const API_HOSTS = [
-  "https://data-api.binance.vision",
   "https://api.binance.com",
   "https://api-gcp.binance.com",
+  "https://data-api.binance.vision",
 ];
+const REQUEST_TIMEOUT_MS = 12_000;
 const SHA_LENGTH_1 = 10;
 const SHA_LENGTH_2 = 10;
 const RSI_LENGTH = 14;
@@ -47,9 +51,18 @@ const SCAN_LIMIT = 25;
 const EXCLUDED_BASES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BRL", "GBP", "UAH", "BIDR", "AEUR"]);
 
 async function requestJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store", mode: "cors" });
-  if (!response.ok) throw new Error(`Binance returned ${response.status}`);
-  return (await response.json()) as T;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { cache: "no-store", mode: "cors", signal: controller.signal });
+    if (!response.ok) throw new Error(`Binance returned ${response.status}`);
+    return (await response.json()) as T;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("Binance request timed out");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function connectToBinance() {
@@ -218,18 +231,11 @@ export function CoinHuntDashboard() {
     setLoading(true);
     setError("");
     try {
-      // Scan from the browser first: Binance blocks datacenter IPs (403), so the
-      // server route only works as a fallback for clients that block Binance.
+      // Binance rejects datacenter IPs with a 403, so the scan has to run from
+      // the visitor's own connection rather than from a server.
       setData(await runBrowserScan());
-    } catch (browserError) {
-      try {
-        const response = await fetch("/api/scan", { cache: "no-store" });
-        const body = (await response.json()) as ScanResponse & { error?: string };
-        if (!response.ok) throw new Error(body.error || "Market data is temporarily unavailable.");
-        setData(body);
-      } catch {
-        setError(browserError instanceof Error ? browserError.message : "Unable to load the market scan.");
-      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load the market scan.");
     } finally {
       setLoading(false);
     }
