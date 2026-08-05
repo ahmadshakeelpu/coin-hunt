@@ -153,11 +153,18 @@ npm run build
 Produces a static export in `out/`. Pushing to `main` builds and publishes it to
 GitHub Pages via `.github/workflows/deploy.yml`.
 
-**Settings → Pages → Source must be "GitHub Actions".** On "Deploy from a
-branch" GitHub additionally runs Jekyll over the repo on every push, and
-whichever pipeline finishes last wins, so the site alternates between this build
-and a Jekyll render of this README. The workflow cannot fix this itself:
-changing the Pages source needs admin rights that `GITHUB_TOKEN` does not have.
+**Settings → Pages → Source should be "GitHub Actions".** On "Deploy from a
+branch" GitHub additionally publishes the repo itself on every push, and
+whichever pipeline finishes last wins — which served a Jekyll render of this
+README at `/` and 404ed `/bearish`, `/mexc` and `/mexc/bearish`, since those
+paths exist only in the build. The workflow cannot change that setting: it needs
+admin rights `GITHUB_TOKEN` does not have.
+
+Until it is switched, the workflow's final step copies the build to the branch
+root so both pipelines serve the same site. The paths it writes are listed in
+`.pages-mirror` and removed on the next run, so stale hashed assets do not
+accumulate. Switching the source makes that step deletable, along with the
+build output committed at the repo root.
 
 ## Disclaimer
 
