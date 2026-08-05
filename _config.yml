@@ -1,0 +1,22 @@
+# Only read when Pages publishes from the branch rather than from Actions.
+#
+# Jekyll drops paths beginning with "_" or "." from its output, which silently
+# deleted the whole _next directory: every page loaded its HTML and then 404ed
+# on all nine script chunks, so React never hydrated and the table sat on its
+# loading skeleton forever. .nojekyll did not prevent this. `include` is the
+# supported way to keep those paths. Files without front matter are copied
+# byte-for-byte, so the bundles are not run through Liquid.
+include:
+  - _next
+
+# Nothing here is a Jekyll source tree; these are only inputs to the real build.
+exclude:
+  - app
+  - node_modules
+  - package.json
+  - package-lock.json
+  - tsconfig.json
+  - next.config.ts
+  - postcss.config.mjs
+  - eslint.config.mjs
+  - README.md
