@@ -56,15 +56,22 @@ export type Preset = {
 export type Exchange = {
   key: "binance" | "mexc";
   label: string;
-  /** REST bases tried in order. Empty means the exchange needs a proxy. */
+  /** REST bases tried in order. */
   hosts: string[];
   /** Interval names differ: MEXC has no "1h", it calls that "60m". */
   intervals: { day: string; hour: string; halfHour: string };
   /** Combined ticker stream URL, or null when the exchange has no usable feed. */
   streamUrl: ((symbols: string[]) => string) | null;
   tradeUrl: (baseAsset: string) => string;
-  /** Why the exchange cannot be scanned from the browser, if it cannot. */
-  unavailableReason?: string;
+  /** Rewrites outbound URLs, e.g. through a CORS proxy. */
+  proxy?: (url: string) => string;
+  /** Binance reports 24h change as a percent, MEXC as a fraction. */
+  changeScale: number;
+  /**
+   * MEXC's exchangeInfo is ~10MB and the proxy rejects it with 413, so its
+   * symbol list is derived from the ticker snapshot instead.
+   */
+  symbolSource: "exchangeInfo" | "tickers";
 };
 
 export const PRESETS: Record<Preset["key"], Preset> = {
@@ -86,9 +93,18 @@ export const PRESETS: Record<Preset["key"], Preset> = {
   },
 };
 
-// MEXC serves datacenter IPs but sends no CORS headers on any REST host, so the
-// browser cannot call it directly. Point this at a proxy that adds them.
-export const MEXC_PROXY = "";
+/**
+ * MEXC sends no CORS headers on any REST host, so the browser cannot call it
+ * directly and every request is routed through a public CORS proxy. That puts a
+ * third party in the live data path: if it rate limits or goes down, the MEXC
+ * pages stop updating. Replace with a self-hosted proxy to remove that risk.
+ */
+const MEXC_PROXY = (url: string) => {
+  // The proxy caches by URL, which would freeze prices at whatever it fetched
+  // first, so every request carries a unique parameter. MEXC ignores it.
+  const fresh = `${url}${url.includes("?") ? "&" : "?"}_=${Date.now()}`;
+  return `https://corsproxy.io/?url=${encodeURIComponent(fresh)}`;
+};
 
 export const EXCHANGES: Record<Exchange["key"], Exchange> = {
   binance: {
@@ -105,20 +121,26 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     streamUrl: (symbols) =>
       `wss://stream.binance.com:9443/stream?streams=${symbols.map((s) => `${s.toLowerCase()}@ticker`).join("/")}`,
     tradeUrl: (baseAsset) => `https://www.binance.com/en/trade/${baseAsset}_USDT?type=spot`,
+    changeScale: 1,
+    symbolSource: "exchangeInfo",
   },
   mexc: {
     key: "mexc",
     label: "MEXC",
-    hosts: MEXC_PROXY ? [MEXC_PROXY] : [],
+    hosts: ["https://api.mexc.com"],
     intervals: { day: "1d", hour: "60m", halfHour: "30m" },
     // MEXC's socket connects from the browser but streams protobuf, not JSON,
-    // so live values come from polling the proxy instead.
+    // so live values come from polling instead.
     streamUrl: null,
     tradeUrl: (baseAsset) => `https://www.mexc.com/exchange/${baseAsset}_USDT`,
-    unavailableReason:
-      "MEXC's API sends no CORS headers, so a browser cannot call it directly. Set MEXC_PROXY to a proxy that adds them.",
+    proxy: MEXC_PROXY,
+    changeScale: 100,
+    symbolSource: "tickers",
   },
 };
+
+export const proxied = (exchange: Exchange, url: string) => (exchange.proxy ? exchange.proxy(url) : url);
+export const tickerUrl = (exchange: Exchange) => proxied(exchange, `${exchange.hosts[0]}/api/v3/ticker/24hr`);
 
 export const REQUEST_TIMEOUT_MS = 12_000;
 export const RESCAN_INTERVAL_MS = 180_000;
@@ -218,12 +240,36 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker:
   return results.filter((value): value is R => value !== null);
 }
 
-async function connect(exchange: Exchange) {
+/** Resolves the tradeable USDT symbols and their base assets. */
+async function listSymbols(exchange: Exchange, host: string, tickers: Ticker[]) {
+  if (exchange.symbolSource === "tickers") {
+    // Every symbol here is already a live spot market, and USDT-quoted pairs
+    // end in "USDT", so the base asset is the remainder.
+    return new Map(
+      tickers
+        .filter((t) => t.symbol.endsWith("USDT") && !EXCLUDED_BASES.has(t.symbol.slice(0, -4)))
+        .map((t) => [t.symbol, { symbol: t.symbol, baseAsset: t.symbol.slice(0, -4) }]),
+    );
+  }
+  const info = await requestJson<ExchangeInfo>(proxied(exchange, `${host}/api/v3/exchangeInfo`));
+  return new Map(
+    info.symbols
+      .filter(
+        (s) =>
+          s.quoteAsset === "USDT" &&
+          s.status.toUpperCase() === "TRADING" &&
+          s.isSpotTradingAllowed !== false &&
+          !EXCLUDED_BASES.has(s.baseAsset),
+      )
+      .map((s) => [s.symbol, { symbol: s.symbol, baseAsset: s.baseAsset }]),
+  );
+}
+
+async function fetchTickers(exchange: Exchange) {
   let lastError: unknown;
   for (const host of exchange.hosts) {
     try {
-      const exchangeInfo = await requestJson<ExchangeInfo>(`${host}/api/v3/exchangeInfo`);
-      return { host, exchangeInfo };
+      return { host, tickers: await requestJson<Ticker[]>(proxied(exchange, `${host}/api/v3/ticker/24hr`)) };
     } catch (error) {
       lastError = error;
     }
@@ -236,20 +282,8 @@ const inBand = (value: number, [min, max]: [number, number]) => value >= min && 
 
 export async function runScan(exchange: Exchange, preset: Preset): Promise<ScanResponse> {
   const started = Date.now();
-  if (!exchange.hosts.length) throw new Error(exchange.unavailableReason ?? `${exchange.label} is not configured.`);
-  const { host, exchangeInfo } = await connect(exchange);
-  const tickers = await requestJson<Ticker[]>(`${host}/api/v3/ticker/24hr`);
-  const symbols = new Map(
-    exchangeInfo.symbols
-      .filter(
-        (s) =>
-          s.quoteAsset === "USDT" &&
-          s.status.toUpperCase() === "TRADING" &&
-          s.isSpotTradingAllowed !== false &&
-          !EXCLUDED_BASES.has(s.baseAsset),
-      )
-      .map((s) => [s.symbol, s]),
-  );
+  const { host, tickers } = await fetchTickers(exchange);
+  const symbols = await listSymbols(exchange, host, tickers);
   const candidates = tickers
     .filter((ticker) => symbols.has(ticker.symbol) && Number(ticker.quoteVolume) > 0)
     .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume))
@@ -259,9 +293,9 @@ export async function runScan(exchange: Exchange, preset: Preset): Promise<ScanR
     const info = symbols.get(ticker.symbol)!;
     const base = `${host}/api/v3/klines?symbol=${encodeURIComponent(ticker.symbol)}&limit=160&interval=`;
     const [day, hour, halfHour] = await Promise.all([
-      requestJson<Kline[]>(`${base}${exchange.intervals.day}`),
-      requestJson<Kline[]>(`${base}${exchange.intervals.hour}`),
-      requestJson<Kline[]>(`${base}${exchange.intervals.halfHour}`),
+      requestJson<Kline[]>(proxied(exchange, `${base}${exchange.intervals.day}`)),
+      requestJson<Kline[]>(proxied(exchange, `${base}${exchange.intervals.hour}`)),
+      requestJson<Kline[]>(proxied(exchange, `${base}${exchange.intervals.halfHour}`)),
     ]);
     const sha1d = smoothedHeikinAshiBullish(day);
     const sha1h = smoothedHeikinAshiBullish(hour);
@@ -284,7 +318,7 @@ export async function runScan(exchange: Exchange, preset: Preset): Promise<ScanR
       symbol: ticker.symbol,
       baseAsset: info.baseAsset,
       price: Number(ticker.lastPrice),
-      change24h: Number(ticker.priceChangePercent),
+      change24h: Number(ticker.priceChangePercent) * exchange.changeScale,
       quoteVolume: Number(ticker.quoteVolume),
       sha1d, sha1h, sha30m, rsi1h, rsi30m, rsi1hFalling, rsi30mFalling,
       match: checks.every(Boolean),

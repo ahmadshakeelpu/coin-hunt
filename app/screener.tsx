@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EXCHANGES, FLASH_MS, FLUSH_INTERVAL_MS, POLL_INTERVAL_MS, PRESETS, RESCAN_INTERVAL_MS,
-  SHA_LENGTH_1, SHA_LENGTH_2, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan,
+  SHA_LENGTH_1, SHA_LENGTH_2, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
   type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
 } from "./screener-core";
 
@@ -107,15 +107,20 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   // Exchanges without a usable socket fall back to polling the ticker snapshot.
   useEffect(() => {
     const symbols = new Set(data?.coins.map((coin) => coin.symbol) ?? []);
-    if (!symbols.size || exchange.streamUrl || !exchange.hosts.length) return;
+    if (!symbols.size || exchange.streamUrl) return;
     let cancelled = false;
     const poll = async () => {
       try {
-        const tickers = await requestJson<Ticker[]>(`${exchange.hosts[0]}/api/v3/ticker/24hr`);
+        const tickers = await requestJson<Ticker[]>(tickerUrl(exchange));
         if (cancelled) return;
         for (const ticker of tickers) {
           if (symbols.has(ticker.symbol)) {
-            recordTick(ticker.symbol, Number(ticker.lastPrice), Number(ticker.priceChangePercent), Number(ticker.quoteVolume));
+            recordTick(
+              ticker.symbol,
+              Number(ticker.lastPrice),
+              Number(ticker.priceChangePercent) * exchange.changeScale,
+              Number(ticker.quoteVolume),
+            );
           }
         }
         setStreaming(true);

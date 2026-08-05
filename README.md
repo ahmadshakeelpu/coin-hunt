@@ -11,8 +11,8 @@ Live: https://ahmadshakeelpu.github.io/coin-hunt/
 | --- | --- | --- | --- |
 | `/` | Binance | Bullish | working |
 | `/bearish` | Binance | Bearish | working |
-| `/mexc` | MEXC | Bullish | needs a proxy, see below |
-| `/mexc/bearish` | MEXC | Bearish | needs a proxy, see below |
+| `/mexc` | MEXC | Bullish | working, via a public CORS proxy |
+| `/mexc/bearish` | MEXC | Bearish | working, via a public CORS proxy |
 
 ## Signal rules
 
@@ -45,19 +45,33 @@ with a partial score so you can see how close they are.
 Stablecoin and fiat bases are excluded, and only the top pairs by 24h quote
 volume are scanned.
 
-## MEXC needs a proxy
+## How MEXC works, and its one weak point
 
 MEXC's REST API returns no `Access-Control-Allow-Origin` header on any host
 (`api.mexc.com`, `www.mexc.com`, `contract.mexc.com`), so a browser cannot call
-it — every request fails with a CORS error while the same URL returns 200 from
-curl. Its WebSocket does connect from a browser, but it streams protobuf rather
-than JSON and cannot supply the 160 candles of history the indicators need.
+it directly — every request fails with a CORS error while the same URL returns
+200 from curl. Its WebSocket does connect from a browser, but it streams
+protobuf rather than JSON and carries no candle history, so it cannot drive the
+indicators either.
 
-Unlike Binance, MEXC does serve datacenter IPs, so a small server-side proxy
-that forwards `/api/v3/*` and adds CORS headers is enough. Point `MEXC_PROXY` in
-`app/screener-core.ts` at it and both MEXC pages start working; they fall back
-to polling the ticker snapshot every 5s for live values, since the protobuf
-socket is not usable.
+Requests therefore go through the public proxy `corsproxy.io`. **This is the
+weak point of the MEXC pages: an unaffiliated third party sits in the live data
+path, and if it rate limits or goes down, those two pages stop updating.**
+Binance is unaffected. Replacing `MEXC_PROXY` in `app/screener-core.ts` with a
+self-hosted proxy removes the dependency; MEXC serves datacenter IPs, so
+anything that forwards `/api/v3/*` and adds CORS headers works.
+
+Three MEXC-specific quirks the adapter handles:
+
+- Its `exchangeInfo` is large enough that the proxy rejects it with `413`, so
+  the symbol list is derived from the ticker snapshot instead (USDT pairs end in
+  `USDT`, so the base asset is the remainder).
+- It reports `priceChangePercent` as a **fraction** where Binance reports a
+  percent, so it is scaled by 100. Without this, a 1% move displays as 0.01%.
+- The proxy caches by URL, which would freeze prices at whatever it fetched
+  first, so every request carries a unique parameter.
+
+Live values come from polling the ticker snapshot every 5s rather than a socket.
 
 ## Live updates
 
