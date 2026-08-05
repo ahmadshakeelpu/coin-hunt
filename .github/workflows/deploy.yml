@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -43,6 +43,33 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: out
+
+      # WORKAROUND. Settings > Pages > Source is still "Deploy from a branch",
+      # so GitHub also publishes the repo itself: the home page renders README
+      # through Jekyll and every route 404s, whenever that pipeline finishes
+      # after this one. Copying the build to the branch root makes both
+      # pipelines serve the same real site. .pages-mirror records what was
+      # copied so the next run can remove it rather than accumulate stale
+      # hashed assets. Delete this step once Source is "GitHub Actions".
+      - name: Mirror build into the branch
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f .pages-mirror ]; then
+            tr '\n' '\0' < .pages-mirror | xargs -0 -r rm -rf --
+          fi
+          (cd out && find . -mindepth 1 -maxdepth 1 -printf '%P\n' | sort) > /tmp/mirror-entries
+          while IFS= read -r entry; do cp -R "out/$entry" "./$entry"; done < /tmp/mirror-entries
+          cp /tmp/mirror-entries .pages-mirror
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Mirror already current."
+            exit 0
+          fi
+          git commit -m "Mirror build for branch publishing [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
 
   deploy:
     needs: build
