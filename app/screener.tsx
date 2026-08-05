@@ -4,13 +4,16 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EXCHANGES, FLASH_MS, FLUSH_INTERVAL_MS, POLL_INTERVAL_MS, PRESETS, RESCAN_INTERVAL_MS,
-  SHA_LENGTH_1, SHA_LENGTH_2, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
+  SHA_LENGTH_1, SHA_LENGTH_2, evaluate, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
   type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
 } from "./screener-core";
 import {
   chime, loadPreference, notifyMatches, readPermission, requestPermission, savePreference,
   type AlertPermission,
 } from "./alerts";
+
+/** A symbol will not alert again within this window. */
+const RE_ANNOUNCE_MS = 10 * 60_000;
 
 const PAGES = [
   { href: "/", exchange: "binance", preset: "bullish", label: "Binance · Bullish" },
@@ -56,8 +59,8 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   // timer so 25 streams do not drive 25 renders a second.
   const pendingRef = useRef<Record<string, LiveTick>>({});
   const lastPriceRef = useRef<Record<string, number>>({});
-  /** Symbols that already matched, so a standing match is not re-announced. */
-  const announcedRef = useRef<Set<string> | null>(null);
+  /** When each symbol was last announced, to rate-limit repeat crossings. */
+  const announcedRef = useRef<Map<string, number>>(new Map());
 
   const recordTick = useCallback((symbol: string, price: number, change24h: number, quoteVolume: number) => {
     if (!Number.isFinite(price)) return;
@@ -76,7 +79,10 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     try {
       // Exchanges reject datacenter IPs, so the scan runs from the visitor's
       // own connection rather than from a server.
-      const [scan, supplyMap] = await Promise.all([runScan(exchange, preset), fetchSupplyMap()]);
+      const [scan, supplyMap] = await Promise.all([
+        runScan(exchange, preset, setData),
+        fetchSupplyMap(),
+      ]);
       setData(scan);
       setSupply(supplyMap);
     } catch (err) {
@@ -93,10 +99,14 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     return () => window.clearInterval(timer);
   }, [load]);
 
-  // Stream only the symbols on screen; the all-market feed is megabytes a second.
+  const symbolKey = useMemo(() => (data?.coins ?? []).map((coin) => coin.symbol).join(","), [data]);
+
+  // Stream only the symbols on screen; the all-market feed is megabytes a
+  // second. Waiting for the sweep to finish keeps the progressive batches from
+  // tearing the socket down and rebuilding it every fifteen rows.
   useEffect(() => {
-    const symbols = data?.coins.map((coin) => coin.symbol) ?? [];
-    if (!symbols.length || !exchange.streamUrl) return;
+    if (loading || !symbolKey || !exchange.streamUrl) return;
+    const symbols = symbolKey.split(",");
     const socket = new WebSocket(exchange.streamUrl(symbols));
     socket.onopen = () => setStreaming(true);
     socket.onclose = () => setStreaming(false);
@@ -111,12 +121,12 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
       }
     };
     return () => socket.close();
-  }, [data, exchange, recordTick]);
+  }, [symbolKey, loading, exchange, recordTick]);
 
   // Exchanges without a usable socket fall back to polling the ticker snapshot.
   useEffect(() => {
-    const symbols = new Set(data?.coins.map((coin) => coin.symbol) ?? []);
-    if (!symbols.size || exchange.streamUrl) return;
+    if (loading || !symbolKey || exchange.streamUrl) return;
+    const symbols = new Set(symbolKey.split(","));
     let cancelled = false;
     const poll = async () => {
       try {
@@ -140,7 +150,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     poll();
     const timer = window.setInterval(poll, POLL_INTERVAL_MS);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [data, exchange, recordTick]);
+  }, [symbolKey, loading, exchange, recordTick]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -184,41 +194,51 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     }
   }, [alertsOn]);
 
-  // Announce only symbols that were not already matching, so a coin that stays
-  // matched across rescans does not fire every three minutes.
-  useEffect(() => {
-    if (!data) return;
-    const current = new Set(data.coins.filter((coin) => coin.match).map((coin) => coin.symbol));
-    const previous = announcedRef.current;
-    announcedRef.current = current;
-    if (!alertsOn) return;
-    const fresh = [...current].filter((symbol) => !previous?.has(symbol));
-    if (!fresh.length) return;
-    notifyMatches(fresh, `${exchange.label} ${preset.key}`, `coin-hunt-${exchange.key}-${preset.key}`);
-    chime();
-  }, [data, alertsOn, exchange, preset]);
-
-  // Row order is fixed by the scan so live prices never reshuffle the table.
-  const coins = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    return (data?.coins ?? [])
-      .filter((coin) => (!matchesOnly || coin.match) && (!q || coin.symbol.includes(q) || coin.baseAsset.includes(q)))
-      .map((coin) => {
+  // Every row scored against its live price. Row order stays as the scan left
+  // it, so a moving RSI never reshuffles the table while it is being read.
+  const evaluated = useMemo(
+    () =>
+      (data?.coins ?? []).map((coin) => {
         const tick = live[coin.symbol];
         const price = tick?.price ?? coin.price;
         const circulating = supply[coin.baseAsset];
         return {
-          ...coin,
+          ...evaluate(coin, preset, price),
           price,
           change24h: tick?.change24h ?? coin.change24h,
           quoteVolume: tick?.quoteVolume ?? coin.quoteVolume,
           marketCap: circulating ? circulating * price : 0,
           dir: tick?.dir ?? null,
         };
-      });
-  }, [data, live, matchesOnly, query, supply]);
+      }),
+    [data, live, preset, supply],
+  );
 
-  const matches = data?.coins.filter((coin) => coin.match).length ?? 0;
+  const coins = useMemo(() => {
+    const q = query.trim().toUpperCase();
+    return evaluated.filter(
+      (coin) => (!matchesOnly || coin.match) && (!q || coin.symbol.includes(q) || coin.baseAsset.includes(q)),
+    );
+  }, [evaluated, matchesOnly, query]);
+
+  const matches = evaluated.filter((coin) => coin.match).length;
+  const matchKey = evaluated.filter((coin) => coin.match).map((coin) => coin.symbol).sort().join(",");
+
+  // Matching is live now, so a coin can cross the band repeatedly. Announce a
+  // symbol at most once per window rather than on every crossing.
+  useEffect(() => {
+    if (!alertsOn || !matchKey) return;
+    const now = Date.now();
+    const fresh = matchKey.split(",").filter((symbol) => {
+      const last = announcedRef.current.get(symbol);
+      return last === undefined || now - last > RE_ANNOUNCE_MS;
+    });
+    if (!fresh.length) return;
+    for (const symbol of fresh) announcedRef.current.set(symbol, now);
+    notifyMatches(fresh, `${exchange.label} ${preset.key}`, `coin-hunt-${exchange.key}-${preset.key}`);
+    chime();
+  }, [matchKey, alertsOn, exchange, preset]);
+
   const updated = data ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
 
   // Badge the tab so a backgrounded page still shows the count.
@@ -329,7 +349,9 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
           <span>
             Signals rescanned {updated} · {data?.scanned ?? 0}
             {data && data.requested > data.scanned ? ` of ${data.requested}` : ""} liquid USDT pairs
-            {data && data.requested > data.scanned ? " (rest rate-limited)" : ""} · {data?.durationMs ?? 0}ms · prices update live
+            {data && data.requested > data.scanned
+              ? ` · ${data.requested - data.scanned} skipped (too little history, or rate-limited)`
+              : ""} · {data?.durationMs ?? 0}ms · RSI and prices update live
           </span>
           <span>{exchange.label} Spot API · market cap from CoinGecko supply × live price · SHA: double EMA {SHA_LENGTH_1}/{SHA_LENGTH_2} · Closed candles only · Research tool, not financial advice.</span>
         </div>

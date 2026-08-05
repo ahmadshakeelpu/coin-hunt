@@ -23,7 +23,7 @@ A pair is an exact match when all five conditions hold on closed candles.
 | Timeframe | Condition |
 | --- | --- |
 | 1 day / 1 hour / 30 min | Smoothed Heikin Ashi green |
-| 1 hour | RSI(14) between 55 and 57 |
+| 1 hour | RSI(14) between 53 and 57 |
 | 30 min | RSI(14) between 56 and 58 |
 
 **Bearish**
@@ -34,16 +34,30 @@ A pair is an exact match when all five conditions hold on closed candles.
 | 1 hour | RSI(14) between 44 and 47 **and falling** |
 | 30 min | RSI(14) between 42 and 44 **and falling** |
 
-"Falling" compares the RSI on the last closed candle against the one before it;
-the table shows a ↓ or ↑ next to each bearish reading. The bullish preset has no
-direction requirement, matching how it was specified.
+"Falling" compares the live RSI against the last closed candle's, so it tracks
+the market rather than the last sweep; the table shows a ↓ or ↑ next to each
+bearish reading. The bullish preset has no direction requirement, matching how
+it was specified.
 
 Smoothed Heikin Ashi is a double EMA (10/10): the OHLC series is smoothed,
 converted to Heikin Ashi, then smoothed again. Pairs that miss are still listed
 with a partial score so you can see how close they are.
 
-Stablecoin and fiat bases are excluded, and only the top pairs by 24h quote
-volume are scanned.
+Stablecoin and fiat bases are excluded.
+
+## Coverage
+
+Binance lists about 670 USDT pairs carrying volume. The scan takes the top 200
+by 24h quote volume, which reaches everything above roughly $0.8M/24h — below
+that, RSI on a thin book is mostly noise. It is one constant (`scanLimit` in
+`app/screener-core.ts`) if you want the whole list; candles are cached until
+they close, so only the first sweep pays for the extra width.
+
+The table fills in batches as the sweep runs rather than waiting for all 200,
+and the footnote reports anything skipped — usually recent listings without
+enough candle history to compute an indicator.
+
+MEXC is capped at 15 for a different reason: see the proxy note below.
 
 ## Match alerts
 
@@ -52,6 +66,9 @@ notification plus a chime whenever a symbol *newly* becomes an exact match. A
 coin that stays matched across rescans is not re-announced, and the tab title
 carries a `(n)` badge so a backgrounded tab still shows the count. The
 preference is remembered per browser.
+
+Because matching is live, a coin can cross in and out of a band repeatedly, so
+each symbol alerts at most once every 10 minutes.
 
 These only fire while the page is open — the tab may be backgrounded or the
 window minimised, but not closed. Alerting with the browser shut would need a
@@ -88,27 +105,32 @@ Live values come from polling the ticker snapshot every 5s rather than a socket.
 
 **The proxy's rate limit is the binding constraint on the MEXC pages.** It
 allows roughly 75 requests per window, and each scanned symbol costs three
-candle requests, so MEXC scans 15 symbols against Binance's 25. Candles are
+candle requests, so MEXC scans 15 symbols against Binance's 200. Candles are
 cached until the candle being built closes — a 30m candle cannot change for 30
 minutes, so rescans reuse them instead of refetching — and failed requests are
 retried, but a fresh load can still lose a few symbols. When that happens the
-footnote says `13 of 15 (rest rate-limited)` rather than quietly showing a short
-table. A self-hosted proxy removes the limit and lets MEXC scan the full 25.
+footnote reports how many were skipped rather than quietly showing a short
+table. A self-hosted proxy removes the limit and lets MEXC scan as wide as
+Binance.
 
 ## Live updates
 
 Price, 24h change and 24h volume stream over Binance's WebSocket feed and update
 about once a second with no interaction. Only the symbols on screen are
 subscribed — the all-market feed is megabytes a second. Frames are buffered and
-flushed on a timer so 25 streams do not drive 25 renders a second, and a price
-cell tints green or red as it moves.
+flushed on a timer so 200 streams do not drive 200 renders a second, and a
+price cell tints green or red as it moves.
 
-Row order is fixed by the scan so live prices never reshuffle the table while
-you are reading it.
+RSI updates live too. The scan keeps the Wilder averages from the last closed
+candle, so the reading for the candle currently being built is one arithmetic
+step from the live price — no refetch. That is the same figure a chart shows
+while a candle is open, and it means the match badge, the "Exact only" filter
+and the alerts all track the market rather than the last sweep.
 
-The indicators are not streamed. Smoothed Heikin Ashi and RSI only change when a
-candle closes, so they refresh over REST every 3 minutes; rescanning faster
-spends rate limit for nothing.
+Smoothed Heikin Ashi is still evaluated on closed candles only, since the rules
+are written against closed candles. Row order is also fixed at scan time, so a
+moving RSI never reshuffles the table while you are reading it. Sweeps refresh
+the candles every 3 minutes.
 
 ## Market cap
 

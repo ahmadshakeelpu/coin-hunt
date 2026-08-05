@@ -11,6 +11,17 @@ export type ExchangeInfo = {
     isSpotTradingAllowed?: boolean;
   }>;
 };
+/**
+ * Enough of the Wilder state at the last closed candle to project the current
+ * reading from a live price, without refetching candles.
+ */
+export type RsiState = {
+  /** RSI at the last closed candle. */
+  closed: number;
+  avgGain: number;
+  avgLoss: number;
+  lastClose: number;
+};
 export type CoinResult = {
   symbol: string;
   baseAsset: string;
@@ -20,6 +31,11 @@ export type CoinResult = {
   sha1d: boolean;
   sha1h: boolean;
   sha30m: boolean;
+  rsi1hState: RsiState;
+  rsi30mState: RsiState;
+};
+/** A coin with its RSI, direction and match recomputed against a live price. */
+export type EvaluatedCoin = CoinResult & {
   rsi1h: number;
   rsi30m: number;
   rsi1hFalling: boolean;
@@ -86,7 +102,7 @@ export const PRESETS: Record<Preset["key"], Preset> = {
     key: "bullish",
     label: "Bullish alignment",
     shaBullish: true,
-    rsi1h: [55, 57],
+    rsi1h: [53, 57],
     rsi30m: [56, 58],
     requireFalling: false,
   },
@@ -129,7 +145,10 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
       `wss://stream.binance.com:9443/stream?streams=${symbols.map((s) => `${s.toLowerCase()}@ticker`).join("/")}`,
     tradeUrl: (baseAsset) => `https://www.binance.com/en/trade/${baseAsset}_USDT?type=spot`,
     changeScale: 1,
-    scanLimit: 25,
+    // 670 USDT pairs carry volume; 200 reaches everything above roughly
+    // $0.8M/24h. Below that RSI on thin books is mostly noise. Candles are
+    // cached until they close, so only the first sweep pays for the width.
+    scanLimit: 200,
     symbolSource: "exchangeInfo",
   },
   mexc: {
@@ -158,6 +177,7 @@ export const RESCAN_INTERVAL_MS = 180_000;
 export const POLL_INTERVAL_MS = 5_000;
 export const FLUSH_INTERVAL_MS = 400;
 export const FLASH_MS = 900;
+const PROGRESS_BATCH = 15;
 export const SHA_LENGTH_1 = 10;
 export const SHA_LENGTH_2 = 10;
 export const RSI_LENGTH = 14;
@@ -206,11 +226,10 @@ export function smoothedHeikinAshiBullish(klines: Kline[]) {
   return finalClose.at(-1)! > finalOpen.at(-1)!;
 }
 
-/**
- * Wilder RSI across the closed candles. Returns the series so callers can see
- * the direction of travel, not just the latest reading.
- */
-export function rsiSeries(klines: Kline[], length = RSI_LENGTH) {
+const toRsi = (gain: number, loss: number) => (loss === 0 ? 100 : 100 - 100 / (1 + gain / loss));
+
+/** Wilder RSI over the closed candles, keeping the state needed to project it. */
+export function rsiState(klines: Kline[], length = RSI_LENGTH): RsiState {
   const closes = closedCandles(klines).map((candle) => Number(candle[4]));
   if (closes.length <= length + 1) throw new Error("Not enough candle history");
   let gain = 0;
@@ -220,17 +239,50 @@ export function rsiSeries(klines: Kline[], length = RSI_LENGTH) {
     gain += Math.max(change, 0);
     loss += Math.max(-change, 0);
   }
-  let averageGain = gain / length;
-  let averageLoss = loss / length;
-  const toRsi = () => (averageLoss === 0 ? 100 : 100 - 100 / (1 + averageGain / averageLoss));
-  const values = [toRsi()];
+  let avgGain = gain / length;
+  let avgLoss = loss / length;
   for (let i = length + 1; i < closes.length; i++) {
     const change = closes[i] - closes[i - 1];
-    averageGain = (averageGain * (length - 1) + Math.max(change, 0)) / length;
-    averageLoss = (averageLoss * (length - 1) + Math.max(-change, 0)) / length;
-    values.push(toRsi());
+    avgGain = (avgGain * (length - 1) + Math.max(change, 0)) / length;
+    avgLoss = (avgLoss * (length - 1) + Math.max(-change, 0)) / length;
   }
-  return values;
+  return { closed: toRsi(avgGain, avgLoss), avgGain, avgLoss, lastClose: closes.at(-1)! };
+}
+
+/**
+ * RSI including the candle currently being built, which is what moves as the
+ * price ticks. One Wilder step from the last closed candle, so it costs nothing
+ * to recompute on every price update.
+ */
+export function projectRsi(state: RsiState, price: number, length = RSI_LENGTH) {
+  if (!Number.isFinite(price) || price <= 0) return state.closed;
+  const change = price - state.lastClose;
+  const gain = (state.avgGain * (length - 1) + Math.max(change, 0)) / length;
+  const loss = (state.avgLoss * (length - 1) + Math.max(-change, 0)) / length;
+  return toRsi(gain, loss);
+}
+
+const inBand = (value: number, [min, max]: [number, number]) => value >= min && value <= max;
+
+/** Scores a coin against a preset using a live price. */
+export function evaluate(coin: CoinResult, preset: Preset, price: number): EvaluatedCoin {
+  const rsi1h = projectRsi(coin.rsi1hState, price);
+  const rsi30m = projectRsi(coin.rsi30mState, price);
+  const rsi1hFalling = rsi1h < coin.rsi1hState.closed;
+  const rsi30mFalling = rsi30m < coin.rsi30mState.closed;
+  const checks = [
+    coin.sha1d === preset.shaBullish,
+    coin.sha1h === preset.shaBullish,
+    coin.sha30m === preset.shaBullish,
+    inBand(rsi1h, preset.rsi1h) && (!preset.requireFalling || rsi1hFalling),
+    inBand(rsi30m, preset.rsi30m) && (!preset.requireFalling || rsi30mFalling),
+  ];
+  return {
+    ...coin,
+    rsi1h, rsi30m, rsi1hFalling, rsi30mFalling,
+    match: checks.every(Boolean),
+    score: checks.filter(Boolean).length,
+  };
 }
 
 const INTERVAL_MS: Record<string, number> = {
@@ -277,9 +329,16 @@ async function fetchKlines(exchange: Exchange, host: string, symbol: string, int
   return klines;
 }
 
-async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R | null>) {
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R | null>,
+  onProgress?: (done: R[]) => void,
+) {
   const results: Array<R | null> = new Array(items.length).fill(null);
+  const settled = () => results.filter((value): value is R => value !== null);
   let cursor = 0;
+  let completed = 0;
   async function run() {
     while (cursor < items.length) {
       const index = cursor++;
@@ -288,10 +347,12 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker:
       } catch {
         results[index] = null;
       }
+      // Report in batches so a long sweep fills the table as it goes.
+      if (onProgress && ++completed % PROGRESS_BATCH === 0) onProgress(settled());
     }
   }
   await Promise.all(Array.from({ length: concurrency }, run));
-  return results.filter((value): value is R => value !== null);
+  return settled();
 }
 
 /** Resolves the tradeable USDT symbols and their base assets. */
@@ -333,9 +394,23 @@ async function fetchTickers(exchange: Exchange) {
   throw new Error(`${exchange.label} market data is unavailable from this network (${reason}). No API key is required.`);
 }
 
-const inBand = (value: number, [min, max]: [number, number]) => value >= min && value <= max;
+/**
+ * Row order is settled here, at scan time, so live prices never reshuffle the
+ * table while it is being read.
+ */
+function rank(coins: CoinResult[], preset: Preset) {
+  return [...coins].sort((a, b) => {
+    const left = evaluate(a, preset, a.price);
+    const right = evaluate(b, preset, b.price);
+    return Number(right.match) - Number(left.match) || right.score - left.score || b.quoteVolume - a.quoteVolume;
+  });
+}
 
-export async function runScan(exchange: Exchange, preset: Preset): Promise<ScanResponse> {
+export async function runScan(
+  exchange: Exchange,
+  preset: Preset,
+  onPartial?: (partial: ScanResponse) => void,
+): Promise<ScanResponse> {
   const started = Date.now();
   const { host, tickers } = await fetchTickers(exchange);
   const symbols = await listSymbols(exchange, host, tickers);
@@ -344,53 +419,44 @@ export async function runScan(exchange: Exchange, preset: Preset): Promise<ScanR
     .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume))
     .slice(0, exchange.scanLimit);
 
-  // Proxied exchanges share one rate limit, so they get less parallelism.
-  const concurrency = exchange.proxy ? 3 : 5;
-  const coins = await mapWithConcurrency(candidates, concurrency, async (ticker) => {
-    const info = symbols.get(ticker.symbol)!;
-    const [day, hour, halfHour] = await Promise.all([
-      fetchKlines(exchange, host, ticker.symbol, exchange.intervals.day),
-      fetchKlines(exchange, host, ticker.symbol, exchange.intervals.hour),
-      fetchKlines(exchange, host, ticker.symbol, exchange.intervals.halfHour),
-    ]);
-    const sha1d = smoothedHeikinAshiBullish(day);
-    const sha1h = smoothedHeikinAshiBullish(hour);
-    const sha30m = smoothedHeikinAshiBullish(halfHour);
-    const hourRsi = rsiSeries(hour);
-    const halfHourRsi = rsiSeries(halfHour);
-    const rsi1h = hourRsi.at(-1)!;
-    const rsi30m = halfHourRsi.at(-1)!;
-    const rsi1hFalling = rsi1h < hourRsi.at(-2)!;
-    const rsi30mFalling = rsi30m < halfHourRsi.at(-2)!;
-
-    const checks = [
-      sha1d === preset.shaBullish,
-      sha1h === preset.shaBullish,
-      sha30m === preset.shaBullish,
-      inBand(rsi1h, preset.rsi1h) && (!preset.requireFalling || rsi1hFalling),
-      inBand(rsi30m, preset.rsi30m) && (!preset.requireFalling || rsi30mFalling),
-    ];
-    return {
-      symbol: ticker.symbol,
-      baseAsset: info.baseAsset,
-      price: Number(ticker.lastPrice),
-      change24h: Number(ticker.priceChangePercent) * exchange.changeScale,
-      quoteVolume: Number(ticker.quoteVolume),
-      sha1d, sha1h, sha30m, rsi1h, rsi30m, rsi1hFalling, rsi30mFalling,
-      match: checks.every(Boolean),
-      score: checks.filter(Boolean).length,
-    };
-  });
-
-  if (!coins.length) throw new Error(`${exchange.label} connected, but candle requests were blocked. Please disable any strict tracker blocker and retry.`);
-  coins.sort((a, b) => Number(b.match) - Number(a.match) || b.score - a.score || b.quoteVolume - a.quoteVolume);
-  return {
-    coins,
+  const snapshot = (coins: CoinResult[]): ScanResponse => ({
+    coins: rank(coins, preset),
     scanned: coins.length,
     requested: candidates.length,
     updatedAt: new Date().toISOString(),
     durationMs: Date.now() - started,
-  };
+  });
+
+  // Proxied exchanges share one rate limit, so they get less parallelism.
+  const concurrency = exchange.proxy ? 3 : 10;
+  const coins = await mapWithConcurrency(
+    candidates,
+    concurrency,
+    async (ticker) => {
+      const info = symbols.get(ticker.symbol)!;
+      const [day, hour, halfHour] = await Promise.all([
+        fetchKlines(exchange, host, ticker.symbol, exchange.intervals.day),
+        fetchKlines(exchange, host, ticker.symbol, exchange.intervals.hour),
+        fetchKlines(exchange, host, ticker.symbol, exchange.intervals.halfHour),
+      ]);
+      return {
+        symbol: ticker.symbol,
+        baseAsset: info.baseAsset,
+        price: Number(ticker.lastPrice),
+        change24h: Number(ticker.priceChangePercent) * exchange.changeScale,
+        quoteVolume: Number(ticker.quoteVolume),
+        sha1d: smoothedHeikinAshiBullish(day),
+        sha1h: smoothedHeikinAshiBullish(hour),
+        sha30m: smoothedHeikinAshiBullish(halfHour),
+        rsi1hState: rsiState(hour),
+        rsi30mState: rsiState(halfHour),
+      };
+    },
+    onPartial && ((done) => onPartial(snapshot(done))),
+  );
+
+  if (!coins.length) throw new Error(`${exchange.label} connected, but candle requests were blocked. Please disable any strict tracker blocker and retry.`);
+  return snapshot(coins);
 }
 
 /**
