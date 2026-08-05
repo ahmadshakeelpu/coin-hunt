@@ -110,7 +110,7 @@ Live values come from polling the ticker snapshot every 5s rather than a socket.
 
 **The proxy's rate limit is the binding constraint on the MEXC pages.** It
 allows roughly 75 requests per window, and each scanned symbol costs three
-candle requests, so MEXC scans 15 symbols against Binance's 200. Candles are
+candle requests, so MEXC scans 15 symbols while Binance scans all ~480. Candles are
 cached until the candle being built closes — a 30m candle cannot change for 30
 minutes, so rescans reuse them instead of refetching — and failed requests are
 retried, but a fresh load can still lose a few symbols. When that happens the
@@ -123,7 +123,7 @@ Binance.
 Price, 24h change and 24h volume stream over Binance's WebSocket feed and update
 about once a second with no interaction. Only the symbols on screen are
 subscribed — the all-market feed is megabytes a second. Frames are buffered and
-flushed on a timer so 200 streams do not drive 200 renders a second, and a
+flushed on a timer so ~480 streams do not drive ~480 renders a second, and a
 price cell tints green or red as it moves.
 
 RSI updates live too. The scan keeps the Wilder averages from the last closed
