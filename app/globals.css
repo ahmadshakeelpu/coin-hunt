@@ -41,6 +41,19 @@ button { cursor: pointer; }
 .live-pill.offline .live-dot { background: #575f57; box-shadow: 0 0 0 5px rgba(255,255,255,.03); animation: none; }
 @keyframes pulse { 50% { opacity: .35; } }
 
+.pagenav {
+  display: flex; gap: 8px; flex-wrap: wrap; width: min(1440px, 92vw); margin: 0 auto;
+  padding: 18px 0 0;
+}
+.pagenav-link {
+  border: 1px solid var(--line); border-radius: 999px; padding: 8px 15px; text-decoration: none;
+  color: #9aa199; font-size: 12px; letter-spacing: .01em; background: #0d100e; white-space: nowrap;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.pagenav-link:hover { color: var(--ink); border-color: #3a423a; }
+.pagenav-link.active.bullish { color: var(--lime); border-color: #596820; background: rgba(201,242,39,.06); }
+.pagenav-link.active.bearish { color: var(--red); border-color: #6d3833; background: rgba(255,118,111,.07); }
+
 .main { width: min(1440px, 92vw); margin: 0 auto; padding: 48px 0 72px; }
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 32px; align-items: end; margin-bottom: 34px; }
 .eyebrow { color: var(--lime); font-family: var(--font-geist-mono); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; }
@@ -62,6 +75,7 @@ h1 { font-size: clamp(38px, 5.5vw, 76px); line-height: .95; letter-spacing: -.07
 .rule-k { color: #6f766e; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
 .rule-v { font-family: var(--font-geist-mono); font-size: 13px; margin-top: 7px; white-space: nowrap; }
 .rule-v.green { color: var(--green); }
+.rule-v.red { color: var(--red); }
 
 .status-row { display: flex; justify-content: space-between; gap: 18px; align-items: center; margin: 24px 0 14px; }
 .status-left { display: flex; align-items: center; gap: 13px; }
@@ -109,6 +123,9 @@ tbody tr:hover { background: rgba(255,255,255,.017); }
 .rsi-bar span { position: absolute; left: 0; top: 0; bottom: 0; background: #899187; }
 .rsi.in-range { color: var(--lime); }
 .rsi.in-range .rsi-bar span { background: var(--lime); }
+.trend { font-size: 11px; }
+.trend.down { color: var(--red); }
+.trend.up { color: #6a726a; }
 .match-badge, .near-badge { display: inline-block; font: 9px var(--font-geist-mono); padding: 5px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: .05em; }
 .match-badge { color: #0b130b; background: var(--green); }
 .near-badge { color: #8d958c; border: 1px solid #303630; }

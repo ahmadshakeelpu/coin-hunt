@@ -5,6 +5,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: "export",
   basePath: "/coin-hunt",
+  // Emit each route as its own directory + index.html so a plain static host
+  // resolves /bearish and /mexc/bearish without extensionless-URL rewriting.
+  trailingSlash: true,
   images: { unoptimized: true },
 };
 

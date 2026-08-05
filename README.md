@@ -1,21 +1,42 @@
 # Coin Hunt
 
-A Binance Spot screener that looks for multi-timeframe trend alignment across
-the most liquid USDT pairs.
+A Spot screener that looks for multi-timeframe trend alignment across the most
+liquid USDT pairs, in both directions, on two exchanges.
 
 Live: https://ahmadshakeelpu.github.io/coin-hunt/
 
+## Pages
+
+| Page | Exchange | Direction | Status |
+| --- | --- | --- | --- |
+| `/` | Binance | Bullish | working |
+| `/bearish` | Binance | Bearish | working |
+| `/mexc` | MEXC | Bullish | needs a proxy, see below |
+| `/mexc/bearish` | MEXC | Bearish | needs a proxy, see below |
+
 ## Signal rules
 
-A pair is an exact match when all five conditions hold on closed candles:
+A pair is an exact match when all five conditions hold on closed candles.
+
+**Bullish**
 
 | Timeframe | Condition |
 | --- | --- |
-| 1 day | Smoothed Heikin Ashi bullish |
-| 1 hour | Smoothed Heikin Ashi bullish |
-| 30 min | Smoothed Heikin Ashi bullish |
+| 1 day / 1 hour / 30 min | Smoothed Heikin Ashi green |
 | 1 hour | RSI(14) between 55 and 57 |
 | 30 min | RSI(14) between 56 and 58 |
+
+**Bearish**
+
+| Timeframe | Condition |
+| --- | --- |
+| 1 day / 1 hour / 30 min | Smoothed Heikin Ashi red |
+| 1 hour | RSI(14) between 44 and 47 **and falling** |
+| 30 min | RSI(14) between 42 and 44 **and falling** |
+
+"Falling" compares the RSI on the last closed candle against the one before it;
+the table shows a ↓ or ↑ next to each bearish reading. The bullish preset has no
+direction requirement, matching how it was specified.
 
 Smoothed Heikin Ashi is a double EMA (10/10): the OHLC series is smoothed,
 converted to Heikin Ashi, then smoothed again. Pairs that miss are still listed
@@ -23,6 +44,20 @@ with a partial score so you can see how close they are.
 
 Stablecoin and fiat bases are excluded, and only the top pairs by 24h quote
 volume are scanned.
+
+## MEXC needs a proxy
+
+MEXC's REST API returns no `Access-Control-Allow-Origin` header on any host
+(`api.mexc.com`, `www.mexc.com`, `contract.mexc.com`), so a browser cannot call
+it — every request fails with a CORS error while the same URL returns 200 from
+curl. Its WebSocket does connect from a browser, but it streams protobuf rather
+than JSON and cannot supply the 160 candles of history the indicators need.
+
+Unlike Binance, MEXC does serve datacenter IPs, so a small server-side proxy
+that forwards `/api/v3/*` and adds CORS headers is enough. Point `MEXC_PROXY` in
+`app/screener-core.ts` at it and both MEXC pages start working; they fall back
+to polling the ticker snapshot every 5s for live values, since the protobuf
+socket is not usable.
 
 ## Live updates
 
