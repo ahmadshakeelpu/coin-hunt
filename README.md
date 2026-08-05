@@ -45,6 +45,19 @@ with a partial score so you can see how close they are.
 Stablecoin and fiat bases are excluded, and only the top pairs by 24h quote
 volume are scanned.
 
+## Match alerts
+
+The 🔔 button asks for browser notification permission and then fires a
+notification plus a chime whenever a symbol *newly* becomes an exact match. A
+coin that stays matched across rescans is not re-announced, and the tab title
+carries a `(n)` badge so a backgrounded tab still shows the count. The
+preference is remembered per browser.
+
+These only fire while the page is open — the tab may be backgrounded or the
+window minimised, but not closed. Alerting with the browser shut would need a
+server running the scan, and Binance rejects datacenter IPs, which is the same
+wall that forced the scan into the browser in the first place.
+
 ## How MEXC works, and its one weak point
 
 MEXC's REST API returns no `Access-Control-Allow-Origin` header on any host
@@ -72,6 +85,15 @@ Three MEXC-specific quirks the adapter handles:
   first, so every request carries a unique parameter.
 
 Live values come from polling the ticker snapshot every 5s rather than a socket.
+
+**The proxy's rate limit is the binding constraint on the MEXC pages.** It
+allows roughly 75 requests per window, and each scanned symbol costs three
+candle requests, so MEXC scans 15 symbols against Binance's 25. Candles are
+cached until the candle being built closes — a 30m candle cannot change for 30
+minutes, so rescans reuse them instead of refetching — and failed requests are
+retried, but a fresh load can still lose a few symbols. When that happens the
+footnote says `13 of 15 (rest rate-limited)` rather than quietly showing a short
+table. A self-hosted proxy removes the limit and lets MEXC scan the full 25.
 
 ## Live updates
 

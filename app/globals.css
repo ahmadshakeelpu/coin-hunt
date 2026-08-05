@@ -90,6 +90,10 @@ h1 { font-size: clamp(38px, 5.5vw, 76px); line-height: .95; letter-spacing: -.07
 .search:focus { border-color: #566524; }
 .filter-button { background: #0d100e; border: 1px solid var(--line); color: #aeb4ad; border-radius: 8px; padding: 9px 12px; }
 .filter-button.active { border-color: #596820; color: var(--lime); background: rgba(201,242,39,.05); }
+.filter-button:disabled { opacity: .45; cursor: not-allowed; }
+.alert-toggle { white-space: nowrap; }
+.alert-toggle.active { animation: bell-in .4s ease; }
+@keyframes bell-in { 0% { transform: scale(.94); } 60% { transform: scale(1.04); } }
 
 .table-wrap { border: 1px solid var(--line); border-radius: 13px; overflow-x: auto; background: rgba(16,20,17,.72); }
 table { width: 100%; border-collapse: collapse; min-width: 1120px; }

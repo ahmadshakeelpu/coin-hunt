@@ -30,6 +30,8 @@ export type CoinResult = {
 export type ScanResponse = {
   coins: CoinResult[];
   scanned: number;
+  /** Candidates the scan attempted; exceeds `scanned` when requests fail. */
+  requested: number;
   updatedAt: string;
   durationMs: number;
 };
@@ -67,6 +69,11 @@ export type Exchange = {
   proxy?: (url: string) => string;
   /** Binance reports 24h change as a percent, MEXC as a fraction. */
   changeScale: number;
+  /**
+   * Symbols scanned per sweep. Each costs three candle requests, so a proxied
+   * exchange has to stay inside the proxy's rate limit.
+   */
+  scanLimit: number;
   /**
    * MEXC's exchangeInfo is ~10MB and the proxy rejects it with 413, so its
    * symbol list is derived from the ticker snapshot instead.
@@ -122,6 +129,7 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
       `wss://stream.binance.com:9443/stream?streams=${symbols.map((s) => `${s.toLowerCase()}@ticker`).join("/")}`,
     tradeUrl: (baseAsset) => `https://www.binance.com/en/trade/${baseAsset}_USDT?type=spot`,
     changeScale: 1,
+    scanLimit: 25,
     symbolSource: "exchangeInfo",
   },
   mexc: {
@@ -135,6 +143,9 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     tradeUrl: (baseAsset) => `https://www.mexc.com/exchange/${baseAsset}_USDT`,
     proxy: MEXC_PROXY,
     changeScale: 100,
+    // The public proxy allows roughly 75 requests per window and each symbol
+    // costs three, so this leaves headroom for the ticker poll and a reload.
+    scanLimit: 15,
     symbolSource: "tickers",
   },
 };
@@ -150,7 +161,6 @@ export const FLASH_MS = 900;
 export const SHA_LENGTH_1 = 10;
 export const SHA_LENGTH_2 = 10;
 export const RSI_LENGTH = 14;
-export const SCAN_LIMIT = 25;
 const EXCLUDED_BASES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BRL", "GBP", "UAH", "BIDR", "AEUR"]);
 
 export async function requestJson<T>(url: string): Promise<T> {
@@ -223,6 +233,50 @@ export function rsiSeries(klines: Kline[], length = RSI_LENGTH) {
   return values;
 }
 
+const INTERVAL_MS: Record<string, number> = {
+  "30m": 30 * 60_000,
+  "60m": 60 * 60_000,
+  "1h": 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+};
+
+/**
+ * Candles are cached until the one being built closes, because the indicators
+ * only read closed candles: nothing they depend on can change until then.
+ * Without this a rescan refetches every candle every few minutes, which burns
+ * the proxy's rate limit and gets symbols dropped from the table.
+ */
+const klineCache = new Map<string, Kline[]>();
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Retries transient proxy failures so a 429 does not silently drop a symbol. */
+async function withRetry<T>(run: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts - 1) await sleep(500 * 2 ** attempt + Math.random() * 250);
+    }
+  }
+  throw lastError;
+}
+
+async function fetchKlines(exchange: Exchange, host: string, symbol: string, interval: string) {
+  const span = INTERVAL_MS[interval] ?? 30 * 60_000;
+  const key = `${exchange.key}|${symbol}|${interval}|${Math.floor(Date.now() / span)}`;
+  const cached = klineCache.get(key);
+  if (cached) return cached;
+  const url = `${host}/api/v3/klines?symbol=${encodeURIComponent(symbol)}&limit=160&interval=${interval}`;
+  const klines = await withRetry(() => requestJson<Kline[]>(proxied(exchange, url)));
+  // Keys carry their own candle bucket, so stale ones simply stop being read.
+  if (klineCache.size > 600) klineCache.clear();
+  klineCache.set(key, klines);
+  return klines;
+}
+
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R | null>) {
   const results: Array<R | null> = new Array(items.length).fill(null);
   let cursor = 0;
@@ -269,7 +323,8 @@ async function fetchTickers(exchange: Exchange) {
   let lastError: unknown;
   for (const host of exchange.hosts) {
     try {
-      return { host, tickers: await requestJson<Ticker[]>(proxied(exchange, `${host}/api/v3/ticker/24hr`)) };
+      const tickers = await withRetry(() => requestJson<Ticker[]>(proxied(exchange, `${host}/api/v3/ticker/24hr`)));
+      return { host, tickers };
     } catch (error) {
       lastError = error;
     }
@@ -287,15 +342,16 @@ export async function runScan(exchange: Exchange, preset: Preset): Promise<ScanR
   const candidates = tickers
     .filter((ticker) => symbols.has(ticker.symbol) && Number(ticker.quoteVolume) > 0)
     .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume))
-    .slice(0, SCAN_LIMIT);
+    .slice(0, exchange.scanLimit);
 
-  const coins = await mapWithConcurrency(candidates, 5, async (ticker) => {
+  // Proxied exchanges share one rate limit, so they get less parallelism.
+  const concurrency = exchange.proxy ? 3 : 5;
+  const coins = await mapWithConcurrency(candidates, concurrency, async (ticker) => {
     const info = symbols.get(ticker.symbol)!;
-    const base = `${host}/api/v3/klines?symbol=${encodeURIComponent(ticker.symbol)}&limit=160&interval=`;
     const [day, hour, halfHour] = await Promise.all([
-      requestJson<Kline[]>(proxied(exchange, `${base}${exchange.intervals.day}`)),
-      requestJson<Kline[]>(proxied(exchange, `${base}${exchange.intervals.hour}`)),
-      requestJson<Kline[]>(proxied(exchange, `${base}${exchange.intervals.halfHour}`)),
+      fetchKlines(exchange, host, ticker.symbol, exchange.intervals.day),
+      fetchKlines(exchange, host, ticker.symbol, exchange.intervals.hour),
+      fetchKlines(exchange, host, ticker.symbol, exchange.intervals.halfHour),
     ]);
     const sha1d = smoothedHeikinAshiBullish(day);
     const sha1h = smoothedHeikinAshiBullish(hour);
@@ -328,7 +384,13 @@ export async function runScan(exchange: Exchange, preset: Preset): Promise<ScanR
 
   if (!coins.length) throw new Error(`${exchange.label} connected, but candle requests were blocked. Please disable any strict tracker blocker and retry.`);
   coins.sort((a, b) => Number(b.match) - Number(a.match) || b.score - a.score || b.quoteVolume - a.quoteVolume);
-  return { coins, scanned: coins.length, updatedAt: new Date().toISOString(), durationMs: Date.now() - started };
+  return {
+    coins,
+    scanned: coins.length,
+    requested: candidates.length,
+    updatedAt: new Date().toISOString(),
+    durationMs: Date.now() - started,
+  };
 }
 
 /**

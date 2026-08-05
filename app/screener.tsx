@@ -7,6 +7,10 @@ import {
   SHA_LENGTH_1, SHA_LENGTH_2, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
   type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
 } from "./screener-core";
+import {
+  chime, loadPreference, notifyMatches, readPermission, requestPermission, savePreference,
+  type AlertPermission,
+} from "./alerts";
 
 const PAGES = [
   { href: "/", exchange: "binance", preset: "bullish", label: "Binance · Bullish" },
@@ -45,10 +49,15 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const [query, setQuery] = useState("");
   const [matchesOnly, setMatchesOnly] = useState(false);
 
+  const [alertsOn, setAlertsOn] = useState(false);
+  const [permission, setPermission] = useState<AlertPermission>("default");
+
   // Frames arrive about once a second per symbol. Buffer them and flush on a
   // timer so 25 streams do not drive 25 renders a second.
   const pendingRef = useRef<Record<string, LiveTick>>({});
   const lastPriceRef = useRef<Record<string, number>>({});
+  /** Symbols that already matched, so a standing match is not re-announced. */
+  const announcedRef = useRef<Set<string> | null>(null);
 
   const recordTick = useCallback((symbol: string, price: number, change24h: number, quoteVolume: number) => {
     if (!Number.isFinite(price)) return;
@@ -154,6 +163,41 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    const current = readPermission();
+    setPermission(current);
+    setAlertsOn(current === "granted" && loadPreference());
+  }, []);
+
+  const toggleAlerts = useCallback(async () => {
+    if (alertsOn) {
+      setAlertsOn(false);
+      savePreference(false);
+      return;
+    }
+    const granted = await requestPermission();
+    setPermission(granted);
+    if (granted === "granted") {
+      setAlertsOn(true);
+      savePreference(true);
+      chime();
+    }
+  }, [alertsOn]);
+
+  // Announce only symbols that were not already matching, so a coin that stays
+  // matched across rescans does not fire every three minutes.
+  useEffect(() => {
+    if (!data) return;
+    const current = new Set(data.coins.filter((coin) => coin.match).map((coin) => coin.symbol));
+    const previous = announcedRef.current;
+    announcedRef.current = current;
+    if (!alertsOn) return;
+    const fresh = [...current].filter((symbol) => !previous?.has(symbol));
+    if (!fresh.length) return;
+    notifyMatches(fresh, `${exchange.label} ${preset.key}`, `coin-hunt-${exchange.key}-${preset.key}`);
+    chime();
+  }, [data, alertsOn, exchange, preset]);
+
   // Row order is fixed by the scan so live prices never reshuffle the table.
   const coins = useMemo(() => {
     const q = query.trim().toUpperCase();
@@ -176,6 +220,12 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
 
   const matches = data?.coins.filter((coin) => coin.match).length ?? 0;
   const updated = data ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+
+  // Badge the tab so a backgrounded page still shows the count.
+  useEffect(() => {
+    const base = document.title.replace(/^\(\d+\)\s*/, "");
+    document.title = matches ? `(${matches}) ${base}` : base;
+  }, [matches]);
   const shaLabel = preset.shaBullish ? "SHA · GREEN" : "SHA · RED";
   const band = (range: [number, number]) =>
     preset.requireFalling ? `${range[1].toFixed(1)} → ${range[0].toFixed(1)} ↓` : `${range[0].toFixed(1)} — ${range[1].toFixed(1)}`;
@@ -227,6 +277,19 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
           <div className="controls">
             <input className="search" aria-label="Search coin" placeholder="Search coin…" value={query} onChange={(e) => setQuery(e.target.value)} />
             <button className={`filter-button ${matchesOnly ? "active" : ""}`} onClick={() => setMatchesOnly((v) => !v)}>Exact only</button>
+            <button
+              className={`filter-button alert-toggle ${alertsOn ? "active" : ""}`}
+              onClick={toggleAlerts}
+              disabled={permission === "unsupported" || permission === "denied"}
+              aria-pressed={alertsOn}
+              title={
+                permission === "unsupported" ? "This browser does not support notifications"
+                  : permission === "denied" ? "Notifications are blocked for this site in your browser settings"
+                  : alertsOn ? "Alerting on new exact matches" : "Alert me on new exact matches"
+              }
+            >
+              {alertsOn ? "🔔 Alerts on" : permission === "denied" ? "🔕 Alerts blocked" : "🔔 Alert me"}
+            </button>
           </div>
         </div>
 
@@ -263,7 +326,11 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
         </div>
 
         <div className="footnote">
-          <span>Signals rescanned {updated} · {data?.scanned ?? 0} liquid USDT pairs · {data?.durationMs ?? 0}ms · prices update live</span>
+          <span>
+            Signals rescanned {updated} · {data?.scanned ?? 0}
+            {data && data.requested > data.scanned ? ` of ${data.requested}` : ""} liquid USDT pairs
+            {data && data.requested > data.scanned ? " (rest rate-limited)" : ""} · {data?.durationMs ?? 0}ms · prices update live
+          </span>
           <span>{exchange.label} Spot API · market cap from CoinGecko supply × live price · SHA: double EMA {SHA_LENGTH_1}/{SHA_LENGTH_2} · Closed candles only · Research tool, not financial advice.</span>
         </div>
       </main>
