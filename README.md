@@ -47,17 +47,22 @@ Stablecoin and fiat bases are excluded.
 
 ## Coverage
 
-Binance lists about 670 USDT pairs carrying volume. The scan takes the top 200
-by 24h quote volume, which reaches everything above roughly $0.8M/24h — below
-that, RSI on a thin book is mostly noise. It is one constant (`scanLimit` in
-`app/screener-core.ts`) if you want the whole list; candles are cached until
-they close, so only the first sweep pays for the extra width.
+**Binance scans every tradeable USDT pair** — around 480 of them, once
+non-spot and delisted symbols are filtered out. That is roughly 1,450 candle
+requests at weight 2, inside Binance's 6,000/min budget, and takes about 30s.
+Only the first sweep pays it: candles are cached until they close, so a rescan
+refetches nothing until a 30m boundary passes.
 
-The table fills in batches as the sweep runs rather than waiting for all 200,
-and the footnote reports anything skipped — usually recent listings without
-enough candle history to compute an indicator.
+The table fills in batches as the sweep runs, and the footnote reports anything
+skipped — usually recent listings without enough candle history to compute an
+indicator.
 
-MEXC is capped at 15 for a different reason: see the proxy note below.
+Rows render 150 at a time behind a "show all" control. Every pair is still
+scanned, filtered, counted and alerted on; the cap only bounds how much DOM the
+live flush has to touch. Rows are memoised on their rendered values, so a tick
+only re-renders the symbols that actually moved.
+
+MEXC is capped at 15 for an unrelated reason: see the proxy note below.
 
 ## Match alerts
 

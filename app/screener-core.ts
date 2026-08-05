@@ -78,8 +78,14 @@ export type Exchange = {
   hosts: string[];
   /** Interval names differ: MEXC has no "1h", it calls that "60m". */
   intervals: { day: string; hour: string; halfHour: string };
-  /** Combined ticker stream URL, or null when the exchange has no usable feed. */
-  streamUrl: ((symbols: string[]) => string) | null;
+  /**
+   * Base socket URL, or null when the exchange has no usable feed. Symbols are
+   * subscribed after connecting rather than in the URL: 670 of them makes a
+   * query string about 9KB long, which is past what is safe to send.
+   */
+  streamUrl: string | null;
+  /** Stream names to SUBSCRIBE once the socket opens. */
+  streamParams?: (symbols: string[]) => string[];
   tradeUrl: (baseAsset: string) => string;
   /** Rewrites outbound URLs, e.g. through a CORS proxy. */
   proxy?: (url: string) => string;
@@ -141,14 +147,15 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
       "https://data-api.binance.vision",
     ],
     intervals: { day: "1d", hour: "1h", halfHour: "30m" },
-    streamUrl: (symbols) =>
-      `wss://stream.binance.com:9443/stream?streams=${symbols.map((s) => `${s.toLowerCase()}@ticker`).join("/")}`,
+    streamUrl: "wss://stream.binance.com:9443/stream",
+    streamParams: (symbols) => symbols.map((symbol) => `${symbol.toLowerCase()}@ticker`),
     tradeUrl: (baseAsset) => `https://www.binance.com/en/trade/${baseAsset}_USDT?type=spot`,
     changeScale: 1,
-    // 670 USDT pairs carry volume; 200 reaches everything above roughly
-    // $0.8M/24h. Below that RSI on thin books is mostly noise. Candles are
-    // cached until they close, so only the first sweep pays for the width.
-    scanLimit: 200,
+    // Every USDT pair with volume, about 670. That is 2010 candle requests at
+    // weight 2, inside the 6000/min budget, and roughly 50s. Only the first
+    // sweep pays it: candles are cached until they close, so a rescan refetches
+    // nothing until a 30m boundary passes.
+    scanLimit: Number.POSITIVE_INFINITY,
     symbolSource: "exchangeInfo",
   },
   mexc: {
@@ -428,7 +435,7 @@ export async function runScan(
   });
 
   // Proxied exchanges share one rate limit, so they get less parallelism.
-  const concurrency = exchange.proxy ? 3 : 10;
+  const concurrency = exchange.proxy ? 3 : 12;
   const coins = await mapWithConcurrency(
     candidates,
     concurrency,

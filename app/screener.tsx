@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EXCHANGES, FLASH_MS, FLUSH_INTERVAL_MS, POLL_INTERVAL_MS, PRESETS, RESCAN_INTERVAL_MS,
   SHA_LENGTH_1, SHA_LENGTH_2, evaluate, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
-  type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
+  type EvaluatedCoin, type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
 } from "./screener-core";
 import {
   chime, loadPreference, notifyMatches, readPermission, requestPermission, savePreference,
@@ -14,6 +14,14 @@ import {
 
 /** A symbol will not alert again within this window. */
 const RE_ANNOUNCE_MS = 10 * 60_000;
+/** Streams per SUBSCRIBE frame. */
+const STREAM_CHUNK = 150;
+/**
+ * Rows rendered before the "show all" control. Every pair is still scanned,
+ * filtered and alerted on; this only bounds how much DOM the 400ms live flush
+ * has to diff, which is what makes 670 rows feel slow rather than the scan.
+ */
+const VISIBLE_ROWS = 150;
 
 const PAGES = [
   { href: "/", exchange: "binance", preset: "bullish", label: "Binance · Bullish" },
@@ -39,6 +47,47 @@ function Rsi({ value, band, falling, requireFalling }: {
   );
 }
 
+const Row = memo(function Row({ coin, preset, tradeUrl }: {
+  coin: EvaluatedCoin & { marketCap: number; dir: "up" | "down" | null };
+  preset: Preset;
+  tradeUrl: (baseAsset: string) => string;
+}) {
+  return (
+    <tr>
+      <td><div className="coin"><span className="coin-icon">{coin.baseAsset.slice(0, 2)}</span><div><div className="coin-name">{coin.baseAsset}</div><div className="coin-pair">{coin.symbol}</div></div></div></td>
+      <td className={`mono tick ${coin.dir ?? ""}`}>${formatPrice(coin.price)}</td>
+      <td className={`mono ${coin.change24h >= 0 ? "positive" : "negative"}`}>{coin.change24h >= 0 ? "+" : ""}{coin.change24h.toFixed(2)}%</td>
+      <td className="mono">{formatUsd(coin.marketCap)}</td>
+      <td className="mono">{formatUsd(coin.quoteVolume)}</td>
+      <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
+      <td><Rsi value={coin.rsi1h} band={preset.rsi1h} falling={coin.rsi1hFalling} requireFalling={preset.requireFalling} /></td>
+      <td><Rsi value={coin.rsi30m} band={preset.rsi30m} falling={coin.rsi30mFalling} requireFalling={preset.requireFalling} /></td>
+      <td><span className={coin.match ? "match-badge" : "near-badge"}>{coin.match ? "Exact match" : `${coin.score}/5 aligned`}</span></td>
+      <td><a className="chart-link" href={tradeUrl(coin.baseAsset)} target="_blank" rel="noreferrer" aria-label={`Open ${coin.baseAsset} chart`}>↗</a></td>
+    </tr>
+  );
+}, (before, after) => {
+  // Each flush rebuilds every coin object, so the default reference check never
+  // bails out. Compare what is actually rendered instead: on a typical tick
+  // only a fraction of symbols move, and the rest then skip re-rendering.
+  const a = before.coin;
+  const b = after.coin;
+  return (
+    before.preset === after.preset &&
+    a.price === b.price &&
+    a.change24h === b.change24h &&
+    a.quoteVolume === b.quoteVolume &&
+    a.marketCap === b.marketCap &&
+    a.rsi1h === b.rsi1h &&
+    a.rsi30m === b.rsi30m &&
+    a.rsi1hFalling === b.rsi1hFalling &&
+    a.rsi30mFalling === b.rsi30mFalling &&
+    a.dir === b.dir &&
+    a.match === b.match &&
+    a.score === b.score
+  );
+});
+
 export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["key"]; presetKey: Preset["key"] }) {
   const exchange = EXCHANGES[exchangeKey];
   const preset = PRESETS[presetKey];
@@ -51,6 +100,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [matchesOnly, setMatchesOnly] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   const [alertsOn, setAlertsOn] = useState(false);
   const [permission, setPermission] = useState<AlertPermission>("default");
@@ -107,8 +157,15 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   useEffect(() => {
     if (loading || !symbolKey || !exchange.streamUrl) return;
     const symbols = symbolKey.split(",");
-    const socket = new WebSocket(exchange.streamUrl(symbols));
-    socket.onopen = () => setStreaming(true);
+    const socket = new WebSocket(exchange.streamUrl);
+    socket.onopen = () => {
+      setStreaming(true);
+      const params = exchange.streamParams?.(symbols) ?? [];
+      // Chunked because a single SUBSCRIBE carrying 670 streams is rejected.
+      for (let i = 0; i < params.length; i += STREAM_CHUNK) {
+        socket.send(JSON.stringify({ method: "SUBSCRIBE", params: params.slice(i, i + STREAM_CHUNK), id: i + 1 }));
+      }
+    };
     socket.onclose = () => setStreaming(false);
     socket.onerror = () => setStreaming(false);
     socket.onmessage = (event) => {
@@ -221,6 +278,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     );
   }, [evaluated, matchesOnly, query]);
 
+  const visible = useMemo(() => (showAll ? coins : coins.slice(0, VISIBLE_ROWS)), [coins, showAll]);
   const matches = evaluated.filter((coin) => coin.match).length;
   const matchKey = evaluated.filter((coin) => coin.match).map((coin) => coin.symbol).sort().join(",");
 
@@ -325,24 +383,19 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
               <tbody>
                 {loading && !data ? Array.from({ length: 7 }, (_, index) => (
                   <tr className="skeleton-row" key={index}>{Array.from({ length: 12 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
-                )) : coins.map((coin) => (
-                  <tr key={coin.symbol}>
-                    <td><div className="coin"><span className="coin-icon">{coin.baseAsset.slice(0, 2)}</span><div><div className="coin-name">{coin.baseAsset}</div><div className="coin-pair">{coin.symbol}</div></div></div></td>
-                    <td className={`mono tick ${coin.dir ?? ""}`}>${formatPrice(coin.price)}</td>
-                    <td className={`mono ${coin.change24h >= 0 ? "positive" : "negative"}`}>{coin.change24h >= 0 ? "+" : ""}{coin.change24h.toFixed(2)}%</td>
-                    <td className="mono">{formatUsd(coin.marketCap)}</td>
-                    <td className="mono">{formatUsd(coin.quoteVolume)}</td>
-                    <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
-                    <td><Rsi value={coin.rsi1h} band={preset.rsi1h} falling={coin.rsi1hFalling} requireFalling={preset.requireFalling} /></td>
-                    <td><Rsi value={coin.rsi30m} band={preset.rsi30m} falling={coin.rsi30mFalling} requireFalling={preset.requireFalling} /></td>
-                    <td><span className={coin.match ? "match-badge" : "near-badge"}>{coin.match ? "Exact match" : `${coin.score}/5 aligned`}</span></td>
-                    <td><a className="chart-link" href={exchange.tradeUrl(coin.baseAsset)} target="_blank" rel="noreferrer" aria-label={`Open ${coin.baseAsset} chart`}>↗</a></td>
-                  </tr>
+                )) : visible.map((coin) => (
+                  <Row key={coin.symbol} coin={coin} preset={preset} tradeUrl={exchange.tradeUrl} />
                 ))}
               </tbody>
             </table>
           )}
           {!loading && !error && coins.length === 0 && <div className="empty"><strong>No coins match this view</strong>Turn off “Exact only” to inspect the closest candidates.</div>}
+          {!error && coins.length > visible.length && (
+            <div className="more-row">
+              Showing the {visible.length} closest of {coins.length} scanned pairs.
+              <button className="filter-button" onClick={() => setShowAll(true)}>Show all {coins.length}</button>
+            </div>
+          )}
         </div>
 
         <div className="footnote">

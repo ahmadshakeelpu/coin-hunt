@@ -135,6 +135,10 @@ tbody tr:hover { background: rgba(255,255,255,.017); }
 .near-badge { color: #8d958c; border: 1px solid #303630; }
 .chart-link { color: #7c847b; text-decoration: none; font-size: 16px; }
 .chart-link:hover { color: var(--lime); }
+.more-row {
+  display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap;
+  padding: 18px 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px;
+}
 .empty, .error { padding: 60px 24px; text-align: center; color: var(--muted); }
 .empty strong, .error strong { display: block; color: var(--ink); margin-bottom: 8px; }
 .skeleton-row td { height: 63px; }
