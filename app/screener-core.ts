@@ -92,10 +92,11 @@ export type Exchange = {
   /** Binance reports 24h change as a percent, MEXC as a fraction. */
   changeScale: number;
   /**
-   * Symbols scanned per sweep. Each costs three candle requests, so a proxied
-   * exchange has to stay inside the proxy's rate limit.
+   * Skip pairs thinner than this in 24h quote volume. Everything above it is
+   * scanned. RSI on a book below roughly $100k/24h is mostly noise, and those
+   * pairs are usually too new to have the candle history anyway.
    */
-  scanLimit: number;
+  minQuoteVolume: number;
   /**
    * MEXC's exchangeInfo is ~10MB and the proxy rejects it with 413, so its
    * symbol list is derived from the ticker snapshot instead.
@@ -124,15 +125,19 @@ export const PRESETS: Record<Preset["key"], Preset> = {
 
 /**
  * MEXC sends no CORS headers on any REST host, so the browser cannot call it
- * directly and every request is routed through a public CORS proxy. That puts a
- * third party in the live data path: if it rate limits or goes down, the MEXC
- * pages stop updating. Replace with a self-hosted proxy to remove that risk.
+ * directly. Requests go through our own edge function (source in ../proxy),
+ * which forwards a fixed allowlist of public read-only endpoints and attaches
+ * the headers. It replaced a public proxy whose ~75 requests per window capped
+ * MEXC coverage at 15 symbols.
  */
+const MEXC_PROXY_BASE = "https://coin-hunt-mexc-proxy-ranksups-projects.vercel.app";
 const MEXC_PROXY = (url: string) => {
-  // The proxy caches by URL, which would freeze prices at whatever it fetched
-  // first, so every request carries a unique parameter. MEXC ignores it.
-  const fresh = `${url}${url.includes("?") ? "&" : "?"}_=${Date.now()}`;
-  return `https://corsproxy.io/?url=${encodeURIComponent(fresh)}`;
+  // The upstream path travels as a query parameter: a nested catch-all route
+  // only matched one path segment, so /api/v3/klines did not reach the handler.
+  const target = new URL(url);
+  const params = new URLSearchParams(target.search);
+  params.set("path", target.pathname);
+  return `${MEXC_PROXY_BASE}/api/mexc?${params.toString()}`;
 };
 
 export const EXCHANGES: Record<Exchange["key"], Exchange> = {
@@ -151,11 +156,10 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     streamParams: (symbols) => symbols.map((symbol) => `${symbol.toLowerCase()}@ticker`),
     tradeUrl: (baseAsset) => `https://www.binance.com/en/trade/${baseAsset}_USDT?type=spot`,
     changeScale: 1,
-    // Every USDT pair with volume, about 670. That is 2010 candle requests at
-    // weight 2, inside the 6000/min budget, and roughly 50s. Only the first
-    // sweep pays it: candles are cached until they close, so a rescan refetches
-    // nothing until a 30m boundary passes.
-    scanLimit: Number.POSITIVE_INFINITY,
+    // Every tradeable USDT pair, about 480. Roughly 1450 candle requests at
+    // weight 2, inside the 6000/min budget, and about 30s. Only the first sweep
+    // pays it: candles are cached until they close.
+    minQuoteVolume: 0,
     symbolSource: "exchangeInfo",
   },
   mexc: {
@@ -169,9 +173,11 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     tradeUrl: (baseAsset) => `https://www.mexc.com/exchange/${baseAsset}_USDT`,
     proxy: MEXC_PROXY,
     changeScale: 100,
-    // The public proxy allows roughly 75 requests per window and each symbol
-    // costs three, so this leaves headroom for the ticker poll and a reload.
-    scanLimit: 15,
+    // MEXC lists ~1730 USDT pairs but only ~300 clear $100k/24h; the rest are
+    // dormant books where the indicators would be meaningless. Scanning those
+    // 300 costs ~900 proxy invocations a sweep, which the free tier absorbs.
+    // Lower this to widen coverage, at the cost of proxy usage.
+    minQuoteVolume: 100_000,
     symbolSource: "tickers",
   },
 };
@@ -422,9 +428,8 @@ export async function runScan(
   const { host, tickers } = await fetchTickers(exchange);
   const symbols = await listSymbols(exchange, host, tickers);
   const candidates = tickers
-    .filter((ticker) => symbols.has(ticker.symbol) && Number(ticker.quoteVolume) > 0)
-    .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume))
-    .slice(0, exchange.scanLimit);
+    .filter((ticker) => symbols.has(ticker.symbol) && Number(ticker.quoteVolume) > exchange.minQuoteVolume)
+    .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume));
 
   const snapshot = (coins: CoinResult[]): ScanResponse => ({
     coins: rank(coins, preset),
@@ -434,8 +439,9 @@ export async function runScan(
     durationMs: Date.now() - started,
   });
 
-  // Proxied exchanges share one rate limit, so they get less parallelism.
-  const concurrency = exchange.proxy ? 3 : 12;
+  // The proxy is ours now, so the only ceiling is MEXC's own rate limit; the
+  // 3-way crawl was there to survive a public proxy's ~75 request budget.
+  const concurrency = exchange.proxy ? 8 : 12;
   const coins = await mapWithConcurrency(
     candidates,
     concurrency,

@@ -11,8 +11,8 @@ Live: https://ahmadshakeelpu.github.io/coin-hunt/
 | --- | --- | --- | --- |
 | `/` | Binance | Bullish | working |
 | `/bearish` | Binance | Bearish | working |
-| `/mexc` | MEXC | Bullish | working, via a public CORS proxy |
-| `/mexc/bearish` | MEXC | Bearish | working, via a public CORS proxy |
+| `/mexc` | MEXC | Bullish | working |
+| `/mexc/bearish` | MEXC | Bearish | working |
 
 ## Signal rules
 
@@ -62,7 +62,10 @@ scanned, filtered, counted and alerted on; the cap only bounds how much DOM the
 live flush has to touch. Rows are memoised on their rendered values, so a tick
 only re-renders the symbols that actually moved.
 
-MEXC is capped at 15 for an unrelated reason: see the proxy note below.
+**MEXC scans every pair above $100k/24h** — about 310 of its ~1,730 USDT
+listings. The rest are dormant books where the indicators would be meaningless,
+and most lack the candle history anyway. Lower `minQuoteVolume` in
+`app/screener-core.ts` to widen it, at the cost of proxy invocations.
 
 ## Match alerts
 
@@ -80,7 +83,7 @@ window minimised, but not closed. Alerting with the browser shut would need a
 server running the scan, and Binance rejects datacenter IPs, which is the same
 wall that forced the scan into the browser in the first place.
 
-## How MEXC works, and its one weak point
+## How MEXC works
 
 MEXC's REST API returns no `Access-Control-Allow-Origin` header on any host
 (`api.mexc.com`, `www.mexc.com`, `contract.mexc.com`), so a browser cannot call
@@ -89,34 +92,34 @@ it directly — every request fails with a CORS error while the same URL returns
 protobuf rather than JSON and carries no candle history, so it cannot drive the
 indicators either.
 
-Requests therefore go through the public proxy `corsproxy.io`. **This is the
-weak point of the MEXC pages: an unaffiliated third party sits in the live data
-path, and if it rate limits or goes down, those two pages stop updating.**
-Binance is unaffected. Replacing `MEXC_PROXY` in `app/screener-core.ts` with a
-self-hosted proxy removes the dependency; MEXC serves datacenter IPs, so
-anything that forwards `/api/v3/*` and adds CORS headers works.
+Requests therefore go through our own edge function, source in [`proxy/`](proxy),
+deployed on Vercel. MEXC serves datacenter IPs — unlike Binance, which `403`s
+them — so forwarding from there works. It replaced the public `corsproxy.io`,
+whose ~75 requests per window capped MEXC coverage at 15 symbols; that ceiling
+is gone and coverage is now ~310.
+
+The proxy forwards a fixed allowlist of public read-only endpoints and nothing
+else. A general-purpose `?url=` proxy would be abused by anyone who found it.
 
 Three MEXC-specific quirks the adapter handles:
 
-- Its `exchangeInfo` is large enough that the proxy rejects it with `413`, so
-  the symbol list is derived from the ticker snapshot instead (USDT pairs end in
-  `USDT`, so the base asset is the remainder).
+- Its `exchangeInfo` is very large, so the symbol list is derived from the
+  ticker snapshot instead (USDT pairs end in `USDT`, so the base asset is the
+  remainder).
 - It reports `priceChangePercent` as a **fraction** where Binance reports a
   percent, so it is scaled by 100. Without this, a 1% move displays as 0.01%.
-- The proxy caches by URL, which would freeze prices at whatever it fetched
-  first, so every request carries a unique parameter.
+- Its kline intervals are named differently: there is no `1h`, it is `60m`.
 
-Live values come from polling the ticker snapshot every 5s rather than a socket.
+Live values come from polling the ticker snapshot every 5s rather than a socket,
+since the protobuf feed is not usable.
 
-**The proxy's rate limit is the binding constraint on the MEXC pages.** It
-allows roughly 75 requests per window, and each scanned symbol costs three
-candle requests, so MEXC scans 15 symbols while Binance scans all ~480. Candles are
-cached until the candle being built closes — a 30m candle cannot change for 30
-minutes, so rescans reuse them instead of refetching — and failed requests are
-retried, but a fresh load can still lose a few symbols. When that happens the
-footnote reports how many were skipped rather than quietly showing a short
-table. A self-hosted proxy removes the limit and lets MEXC scan as wide as
-Binance.
+### Proxy cost
+
+A full MEXC sweep is about 900 invocations, and after the first sweep candles
+are only refetched when one closes, so a tab open continuously costs roughly
+1,000 invocations an hour. Candle responses are cached at the edge for 25s and
+ticker responses for 2s, which absorbs repeat viewers. If usage matters, raise
+`minQuoteVolume` — it is the single dial on how much this costs.
 
 ## Live updates
 
