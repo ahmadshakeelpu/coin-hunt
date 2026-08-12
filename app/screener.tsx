@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  EXCHANGES, FLASH_MS, FLUSH_INTERVAL_MS, POLL_INTERVAL_MS, PRESETS, RESCAN_INTERVAL_MS,
+  EXCHANGES, FLASH_MS, FLUSH_INTERVAL_MS, PRESETS, RESCAN_INTERVAL_MS,
   SHA_LENGTH_1, SHA_LENGTH_2, evaluate, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
   type EvaluatedCoin, type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
 } from "./screener-core";
 import {
-  chime, loadPreference, notifyMatches, readPermission, requestPermission, savePreference,
-  type AlertPermission,
+  chime, loadPreference, loadSoundPreference, notifyMatches, readPermission, requestPermission,
+  savePreference, saveSoundPreference,
+  type AlertEvent, type AlertPermission,
 } from "./alerts";
 
 /** A symbol will not alert again within this window. */
@@ -23,11 +24,23 @@ const STREAM_CHUNK = 150;
  */
 const VISIBLE_ROWS = 150;
 
-const PAGES = [
-  { href: "/", exchange: "binance", preset: "bullish", label: "Binance · Bullish" },
-  { href: "/bearish", exchange: "binance", preset: "bearish", label: "Binance · Bearish" },
-  { href: "/mexc", exchange: "mexc", preset: "bullish", label: "MEXC · Bullish" },
-  { href: "/mexc/bearish", exchange: "mexc", preset: "bearish", label: "MEXC · Bearish" },
+const NAV_GROUPS = [
+  {
+    label: "Futures",
+    pages: [
+      { href: "/futures", exchange: "binance-futures", preset: "bullish", label: "Binance · Bullish" },
+      { href: "/futures/bearish", exchange: "binance-futures", preset: "bearish", label: "Binance · Bearish" },
+    ],
+  },
+  {
+    label: "Spot",
+    pages: [
+      { href: "/", exchange: "binance", preset: "bullish", label: "Binance · Bullish" },
+      { href: "/bearish", exchange: "binance", preset: "bearish", label: "Binance · Bearish" },
+      { href: "/mexc", exchange: "mexc", preset: "bullish", label: "MEXC · Bullish" },
+      { href: "/mexc/bearish", exchange: "mexc", preset: "bearish", label: "MEXC · Bearish" },
+    ],
+  },
 ] as const;
 
 function Candle({ bull }: { bull: boolean }) {
@@ -38,10 +51,15 @@ function Rsi({ value, band, falling, requireFalling }: {
   value: number; band: [number, number]; falling: boolean; requireFalling: boolean;
 }) {
   const ok = value >= band[0] && value <= band[1] && (!requireFalling || falling);
+  // The arrow shows on both presets. Only bearish requires the direction, but
+  // knowing whether a bullish reading is climbing into its band or falling out
+  // of it is the whole point of watching it live.
   return (
     <span className={`rsi ${ok ? "in-range" : ""}`}>
       {value.toFixed(1)}
-      {requireFalling && <span className={`trend ${falling ? "down" : "up"}`}>{falling ? "↓" : "↑"}</span>}
+      <span className={`trend ${falling ? "down" : "up"}`} title={falling ? "RSI falling" : "RSI rising"}>
+        {falling ? "↓" : "↑"}
+      </span>
       <span className="rsi-bar"><span style={{ width: `${Math.min(100, Math.max(0, value))}%` }} /></span>
     </span>
   );
@@ -62,7 +80,7 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
       <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
       <td><Rsi value={coin.rsi1h} band={preset.rsi1h} falling={coin.rsi1hFalling} requireFalling={preset.requireFalling} /></td>
       <td><Rsi value={coin.rsi30m} band={preset.rsi30m} falling={coin.rsi30mFalling} requireFalling={preset.requireFalling} /></td>
-      <td><span className={coin.match ? "match-badge" : "near-badge"}>{coin.match ? "Exact match" : `${coin.score}/5 aligned`}</span></td>
+      <td><span className={coin.match ? "match-badge" : "near-badge"}>{coin.match ? "Exact match" : `${coin.score}/${coin.total} aligned`}</span></td>
       <td><a className="chart-link" href={tradeUrl(coin.baseAsset)} target="_blank" rel="noreferrer" aria-label={`Open ${coin.baseAsset} chart`}>↗</a></td>
     </tr>
   );
@@ -84,7 +102,8 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
     a.rsi30mFalling === b.rsi30mFalling &&
     a.dir === b.dir &&
     a.match === b.match &&
-    a.score === b.score
+    a.score === b.score &&
+    a.total === b.total
   );
 });
 
@@ -99,11 +118,16 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
-  const [matchesOnly, setMatchesOnly] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  /** Minimum passing checks a row must have to be listed. */
+  const [minScore, setMinScore] = useState(0);
+  const [signalOnly, setSignalOnly] = useState<"all" | "rsi" | "sha">("all");
 
   const [alertsOn, setAlertsOn] = useState(false);
+  const [soundOn, setSoundOn] = useState(true);
   const [permission, setPermission] = useState<AlertPermission>("default");
+  const [toasts, setToasts] = useState<AlertEvent[]>([]);
+  const [history, setHistory] = useState<AlertEvent[]>([]);
 
   // Frames arrive about once a second per symbol. Buffer them and flush on a
   // timer so 25 streams do not drive 25 renders a second.
@@ -205,7 +229,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
       }
     };
     poll();
-    const timer = window.setInterval(poll, POLL_INTERVAL_MS);
+    const timer = window.setInterval(poll, exchange.pollIntervalMs);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [symbolKey, loading, exchange, recordTick]);
 
@@ -234,7 +258,18 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     const current = readPermission();
     setPermission(current);
     setAlertsOn(current === "granted" && loadPreference());
+    setSoundOn(loadSoundPreference());
   }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+
+  const raiseAlert = useCallback((event: AlertEvent) => {
+    setToasts((current) => [event, ...current].slice(0, 3));
+    setHistory((current) => [event, ...current].slice(0, 25));
+    window.setTimeout(() => dismissToast(event.id), 12_000);
+  }, [dismissToast]);
 
   const toggleAlerts = useCallback(async () => {
     if (alertsOn) {
@@ -244,12 +279,21 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     }
     const granted = await requestPermission();
     setPermission(granted);
-    if (granted === "granted") {
-      setAlertsOn(true);
-      savePreference(true);
-      chime();
-    }
-  }, [alertsOn]);
+    // Toasts work without notification permission, so alerting is still useful
+    // when the browser prompt is declined.
+    setAlertsOn(true);
+    savePreference(true);
+    if (soundOn) chime(preset.key);
+  }, [alertsOn, soundOn, preset]);
+
+  const toggleSound = useCallback(() => {
+    setSoundOn((current) => {
+      const next = !current;
+      saveSoundPreference(next);
+      if (next) chime(preset.key);
+      return next;
+    });
+  }, [preset]);
 
   // Every row scored against its live price. Row order stays as the scan left
   // it, so a moving RSI never reshuffles the table while it is being read.
@@ -274,9 +318,14 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const coins = useMemo(() => {
     const q = query.trim().toUpperCase();
     return evaluated.filter(
-      (coin) => (!matchesOnly || coin.match) && (!q || coin.symbol.includes(q) || coin.baseAsset.includes(q)),
+      (coin) =>
+        coin.score >= Math.min(minScore, coin.total) &&
+        (!q || coin.symbol.includes(q) || coin.baseAsset.includes(q)),
     );
-  }, [evaluated, matchesOnly, query]);
+  }, [evaluated, minScore, query]);
+
+  const evaluatedRef = useRef(evaluated);
+  evaluatedRef.current = evaluated;
 
   const visible = useMemo(() => (showAll ? coins : coins.slice(0, VISIBLE_ROWS)), [coins, showAll]);
   const matches = evaluated.filter((coin) => coin.match).length;
@@ -287,23 +336,39 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   useEffect(() => {
     if (!alertsOn || !matchKey) return;
     const now = Date.now();
-    const fresh = matchKey.split(",").filter((symbol) => {
+    const symbols = matchKey.split(",").filter((symbol) => {
       const last = announcedRef.current.get(symbol);
       return last === undefined || now - last > RE_ANNOUNCE_MS;
     });
-    if (!fresh.length) return;
-    for (const symbol of fresh) announcedRef.current.set(symbol, now);
-    notifyMatches(fresh, `${exchange.label} ${preset.key}`, `coin-hunt-${exchange.key}-${preset.key}`);
-    chime();
-  }, [matchKey, alertsOn, exchange, preset]);
+    if (!symbols.length) return;
+    for (const symbol of symbols) announcedRef.current.set(symbol, now);
 
-  const updated = data ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+    const byId = new Map(evaluatedRef.current.map((coin) => [coin.symbol, coin]));
+    const details = symbols.map((symbol) => {
+      const coin = byId.get(symbol);
+      return {
+        symbol,
+        price: coin ? `$${formatPrice(coin.price)}` : "",
+        rsi1h: coin?.rsi1h ?? 0,
+        rsi30m: coin?.rsi30m ?? 0,
+      };
+    });
+    const context = `${exchange.label} ${preset.key}`;
+    notifyMatches(details, context, `coin-hunt-${exchange.key}-${preset.key}`);
+    if (soundOn) chime(preset.key);
+    raiseAlert({ id: `${now}-${symbols[0]}`, symbols, context, tone: preset.key, at: now });
+  }, [matchKey, alertsOn, soundOn, exchange, preset, raiseAlert]);
 
   // Badge the tab so a backgrounded page still shows the count.
   useEffect(() => {
     const base = document.title.replace(/^\(\d+\)\s*/, "");
     document.title = matches ? `(${matches}) ${base}` : base;
   }, [matches]);
+  const updated = data
+    ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "—";
+  const checksTotal = (preset.shaRequired.day ? 1 : 0) + (preset.shaRequired.hour ? 1 : 0)
+    + (preset.shaRequired.halfHour ? 1 : 0) + 2;
   const shaLabel = preset.shaBullish ? "SHA · GREEN" : "SHA · RED";
   const band = (range: [number, number]) =>
     preset.requireFalling ? `${range[1].toFixed(1)} → ${range[0].toFixed(1)} ↓` : `${range[0].toFixed(1)} — ${range[1].toFixed(1)}`;
@@ -318,14 +383,24 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
       </header>
 
       <nav className="pagenav" aria-label="Screener pages">
-        {PAGES.map((page) => {
-          const active = page.exchange === exchangeKey && page.preset === presetKey;
-          return (
-            <Link key={page.href} href={page.href} className={`pagenav-link ${active ? "active" : ""} ${page.preset}`} aria-current={active ? "page" : undefined}>
-              {page.label}
-            </Link>
-          );
-        })}
+        {NAV_GROUPS.map((group) => (
+          <div className="pagenav-group" key={group.label}>
+            <span className="pagenav-label">{group.label}</span>
+            {group.pages.map((page) => {
+              const active = page.exchange === exchangeKey && page.preset === presetKey;
+              return (
+                <Link
+                  key={page.href}
+                  href={page.href}
+                  className={`pagenav-link ${active ? "active" : ""} ${page.preset}`}
+                  aria-current={active ? "page" : undefined}
+                >
+                  {page.label}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       <main className="main">
@@ -344,7 +419,12 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
 
         <section className="rule-strip" aria-label="Active signal rules">
           <div className="rule"><div className="rule-k">1 Day</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
-          <div className="rule"><div className="rule-k">1 Hour</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
+          <div className="rule">
+            <div className="rule-k">1 Hour{preset.shaRequired.hour ? "" : " · optional"}</div>
+            <div className={`rule-v ${preset.shaRequired.hour ? (preset.shaBullish ? "green" : "red") : "muted"}`}>
+              {preset.shaRequired.hour ? shaLabel : "SHA · ANY"}
+            </div>
+          </div>
           <div className="rule"><div className="rule-k">30 Minutes</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
           <div className="rule"><div className="rule-k">1H RSI (14)</div><div className="rule-v">{band(preset.rsi1h)}</div></div>
           <div className="rule"><div className="rule-k">30m RSI (14)</div><div className="rule-v">{band(preset.rsi30m)}</div></div>
@@ -354,19 +434,36 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
           <div className="status-left"><h2>Market candidates</h2><span className="count">{matches} MATCH{matches === 1 ? "" : "ES"}</span></div>
           <div className="controls">
             <input className="search" aria-label="Search coin" placeholder="Search coin…" value={query} onChange={(e) => setQuery(e.target.value)} />
-            <button className={`filter-button ${matchesOnly ? "active" : ""}`} onClick={() => setMatchesOnly((v) => !v)}>Exact only</button>
+            <select
+              className="select-filter"
+              aria-label="Filter by how many checks pass"
+              value={minScore}
+              onChange={(e) => setMinScore(Number(e.target.value))}
+            >
+              <option value={0}>All coins</option>
+              <option value={checksTotal - 2}>Within 2 checks</option>
+              <option value={checksTotal - 1}>Within 1 check</option>
+              <option value={checksTotal}>Exact matches only</option>
+            </select>
             <button
               className={`filter-button alert-toggle ${alertsOn ? "active" : ""}`}
               onClick={toggleAlerts}
-              disabled={permission === "unsupported" || permission === "denied"}
               aria-pressed={alertsOn}
               title={
-                permission === "unsupported" ? "This browser does not support notifications"
-                  : permission === "denied" ? "Notifications are blocked for this site in your browser settings"
+                permission === "denied"
+                  ? "Browser notifications are blocked, but on-page alerts still work"
                   : alertsOn ? "Alerting on new exact matches" : "Alert me on new exact matches"
               }
             >
-              {alertsOn ? "🔔 Alerts on" : permission === "denied" ? "🔕 Alerts blocked" : "🔔 Alert me"}
+              {alertsOn ? (permission === "granted" ? "🔔 Alerts on" : "🔔 On-page only") : "🔔 Alert me"}
+            </button>
+            <button
+              className={`filter-button sound-toggle ${soundOn ? "active" : ""}`}
+              onClick={toggleSound}
+              aria-pressed={soundOn}
+              title={soundOn ? "Sound on — click to mute, or to hear it again" : "Sound muted"}
+            >
+              {soundOn ? "🔊" : "🔇"}
             </button>
           </div>
         </div>
@@ -409,6 +506,24 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
           <span>{exchange.label} Spot API · market cap from CoinGecko supply × live price · SHA: double EMA {SHA_LENGTH_1}/{SHA_LENGTH_2} · Closed candles only · Research tool, not financial advice.</span>
         </div>
       </main>
+
+      {/* On-page alerts, so a match still surfaces when browser notifications
+          are blocked or the prompt was declined. */}
+      <div className="toast-stack" aria-live="polite" aria-atomic="false">
+        {toasts.map((toast) => (
+          <div key={toast.id} className={`toast ${toast.tone}`} role="status">
+            <div className="toast-mark">{toast.tone === "bullish" ? "▲" : "▼"}</div>
+            <div className="toast-body">
+              <strong>
+                {toast.symbols.length} exact match{toast.symbols.length === 1 ? "" : "es"}
+              </strong>
+              <span>{toast.symbols.slice(0, 5).join(", ")}{toast.symbols.length > 5 ? ` +${toast.symbols.length - 5}` : ""}</span>
+              <span className="toast-meta">{toast.context} · {new Date(toast.at).toLocaleTimeString()}</span>
+            </div>
+            <button className="toast-close" onClick={() => dismissToast(toast.id)} aria-label="Dismiss alert">×</button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -7,12 +7,16 @@ Live: https://ahmadshakeelpu.github.io/coin-hunt/
 
 ## Pages
 
-| Page | Exchange | Direction | Status |
-| --- | --- | --- | --- |
-| `/` | Binance | Bullish | working |
-| `/bearish` | Binance | Bearish | working |
-| `/mexc` | MEXC | Bullish | working |
-| `/mexc/bearish` | MEXC | Bearish | working |
+| Page | Market | Direction |
+| --- | --- | --- |
+| `/futures` | Binance Futures | Bullish |
+| `/futures/bearish` | Binance Futures | Bearish |
+| `/` | Binance Spot | Bullish |
+| `/bearish` | Binance Spot | Bearish |
+| `/mexc` | MEXC Spot | Bullish |
+| `/mexc/bearish` | MEXC Spot | Bearish |
+
+The nav groups Futures and Spot on separate rows.
 
 ## Signal rules
 
@@ -22,9 +26,15 @@ A pair is an exact match when all five conditions hold on closed candles.
 
 | Timeframe | Condition |
 | --- | --- |
-| 1 day / 1 hour / 30 min | Smoothed Heikin Ashi green |
+| 1 day | Smoothed Heikin Ashi green |
+| 1 hour | Smoothed Heikin Ashi — **advisory, does not gate the match** |
+| 30 min | Smoothed Heikin Ashi green |
 | 1 hour | RSI(14) between 53 and 57 |
 | 30 min | RSI(14) between 56 and 58 |
+
+A bullish coin can therefore be an exact match with 1H SHA still red. The column
+still shows it, and the rule strip labels it "optional", but it is not one of the
+four checks. Bearish requires all three SHA timeframes, so it scores out of five.
 
 **Bearish**
 
@@ -35,9 +45,10 @@ A pair is an exact match when all five conditions hold on closed candles.
 | 30 min | RSI(14) between 42 and 44 **and falling** |
 
 "Falling" compares the live RSI against the last closed candle's, so it tracks
-the market rather than the last sweep; the table shows a ↓ or ↑ next to each
-bearish reading. The bullish preset has no direction requirement, matching how
-it was specified.
+the market rather than the last sweep. **Both presets show a ↓ or ↑** next to
+every RSI reading — bearish requires the direction, bullish does not, but seeing
+whether a reading is climbing into its band or falling out of it is the point of
+watching it live.
 
 Smoothed Heikin Ashi is a double EMA (10/10): the OHLC series is smoothed,
 converted to Heikin Ashi, then smoothed again. Pairs that miss are still listed
@@ -67,21 +78,50 @@ listings. The rest are dormant books where the indicators would be meaningless,
 and most lack the candle history anyway. Lower `minQuoteVolume` in
 `app/screener-core.ts` to widen it, at the cost of proxy invocations.
 
+## Filtering
+
+Alongside search there is a filter on how many checks a row passes: all coins,
+within 2, within 1, or exact matches only. It runs on the live evaluation, so a
+coin entering or leaving the band moves between filters as it happens.
+
 ## Match alerts
 
-The 🔔 button asks for browser notification permission and then fires a
-notification plus a chime whenever a symbol *newly* becomes an exact match. A
-coin that stays matched across rescans is not re-announced, and the tab title
-carries a `(n)` badge so a backgrounded tab still shows the count. The
-preference is remembered per browser.
+When a symbol newly becomes an exact match you get three things at once: a
+browser notification listing each symbol with its price and both RSI readings, a
+chime, and an on-page toast.
 
-Because matching is live, a coin can cross in and out of a band repeatedly, so
-each symbol alerts at most once every 10 minutes.
+The toast matters because it works **without** notification permission — if the
+browser prompt is declined or blocked, alerts still surface on the page rather
+than failing silently. The 🔔 button reflects which you are getting.
+
+The chime is synthesised, so the build carries no audio file: a rising major
+arpeggio on bullish pages and a falling minor one on bearish, so the two are
+distinguishable without looking. 🔊 mutes it, and clicking it while unmuted
+replays it so you know what you are listening for. One AudioContext is shared
+for the page — creating one per alert eventually throws and kills sound entirely.
+
+A coin that stays matched is not re-announced, and the tab title carries a `(n)`
+badge so a backgrounded tab still shows the count. Because matching is live, a
+coin can cross in and out of a band repeatedly, so each symbol alerts at most
+once every 10 minutes.
 
 These only fire while the page is open — the tab may be backgrounded or the
 window minimised, but not closed. Alerting with the browser shut would need a
 server running the scan, and Binance rejects datacenter IPs, which is the same
 wall that forced the scan into the browser in the first place.
+
+### Binance Futures pacing
+
+Futures allows **2,400 request-weight a minute against spot's 6,000**. Sweeping
+all 526 perpetuals at spot pacing spent roughly three times that and earned a
+`418` IP ban, so futures scans pairs above $2M/24h, four requests at a time,
+and polls the ticker every 15s rather than 5s. Concurrency, poll interval and
+volume floor are all per-exchange for this reason.
+
+Its WebSocket is not used: `fstream.binance.com` accepts the connection and
+acknowledges `SUBSCRIBE`, then sends nothing — no frames arrived on `@ticker`,
+`@miniTicker`, `@aggTrade` or `@markPrice` while futures REST worked throughout.
+Live values come from polling instead.
 
 ## How MEXC works
 

@@ -169,3 +169,45 @@ tbody tr:hover { background: rgba(255,255,255,.017); }
   .search { flex: 1; min-width: 0; }
   .footnote { flex-direction: column; }
 }
+
+.select-filter {
+  background: #0d100e; border: 1px solid var(--line); color: #aeb4ad;
+  border-radius: 8px; padding: 9px 12px; outline: none;
+}
+.select-filter:focus { border-color: #566524; }
+.sound-toggle { padding: 9px 12px; }
+.rule-v.muted { color: #6a726a; }
+
+.toast-stack {
+  position: fixed; right: 20px; bottom: 20px; z-index: 40;
+  display: flex; flex-direction: column; gap: 10px; max-width: min(360px, calc(100vw - 40px));
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 12px; padding: 14px 14px 14px 12px;
+  border-radius: 12px; border: 1px solid var(--line); background: rgba(16,20,17,.97);
+  backdrop-filter: blur(10px); box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  animation: toast-in .28s cubic-bezier(.2,.9,.3,1.2);
+}
+.toast.bullish { border-color: #4d6a3a; }
+.toast.bearish { border-color: #6d3833; }
+.toast-mark { font-size: 15px; line-height: 1.2; }
+.toast.bullish .toast-mark { color: var(--green); }
+.toast.bearish .toast-mark { color: var(--red); }
+.toast-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; }
+.toast-body strong { letter-spacing: -.01em; }
+.toast-body span { color: var(--muted); overflow-wrap: anywhere; }
+.toast-meta { font: 10px var(--font-geist-mono); color: #6a726a; }
+.toast-close {
+  margin-left: auto; background: none; border: 0; color: #6a726a; font-size: 17px; line-height: 1;
+  padding: 0 2px;
+}
+.toast-close:hover { color: var(--ink); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px) scale(.97); } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+
+.pagenav { flex-direction: column; align-items: stretch; gap: 10px; }
+.pagenav-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pagenav-label {
+  font: 9px var(--font-geist-mono); letter-spacing: .14em; text-transform: uppercase;
+  color: #6f766e; min-width: 58px;
+}

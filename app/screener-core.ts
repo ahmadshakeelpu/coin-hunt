@@ -9,6 +9,8 @@ export type ExchangeInfo = {
     quoteAsset: string;
     status: string;
     isSpotTradingAllowed?: boolean;
+    /** Futures only. Non-perpetual contracts are dated and excluded. */
+    contractType?: string;
   }>;
 };
 /**
@@ -42,6 +44,8 @@ export type EvaluatedCoin = CoinResult & {
   rsi30mFalling: boolean;
   match: boolean;
   score: number;
+  /** Checks that gate the match, which varies by preset. */
+  total: number;
 };
 export type ScanResponse = {
   coins: CoinResult[];
@@ -69,11 +73,19 @@ export type Preset = {
   rsi30m: [number, number];
   /** Bearish also requires RSI to be declining, not merely inside the band. */
   requireFalling: boolean;
+  /**
+   * Which SHA timeframes gate the match. 1H is advisory on the bullish preset:
+   * it is still shown, and still scored, but a red 1H no longer stops a coin
+   * being an exact match when everything else lines up.
+   */
+  shaRequired: { day: boolean; hour: boolean; halfHour: boolean };
 };
 
 export type Exchange = {
-  key: "binance" | "mexc";
+  key: "binance" | "mexc" | "binance-futures";
   label: string;
+  /** Path prefix for REST calls: spot is /api/v3, futures is /fapi/v1. */
+  apiPath: string;
   /** REST bases tried in order. */
   hosts: string[];
   /** Interval names differ: MEXC has no "1h", it calls that "60m". */
@@ -98,6 +110,13 @@ export type Exchange = {
    */
   minQuoteVolume: number;
   /**
+   * Parallel candle requests. Binance Futures allows 2400 weight a minute
+   * against spot's 6000, so it has to crawl or the sweep earns a 418 ban.
+   */
+  concurrency: number;
+  /** Ticker poll interval for exchanges without a usable socket. */
+  pollIntervalMs: number;
+  /**
    * MEXC's exchangeInfo is ~10MB and the proxy rejects it with 413, so its
    * symbol list is derived from the ticker snapshot instead.
    */
@@ -112,6 +131,7 @@ export const PRESETS: Record<Preset["key"], Preset> = {
     rsi1h: [53, 57],
     rsi30m: [56, 58],
     requireFalling: false,
+    shaRequired: { day: true, hour: false, halfHour: true },
   },
   bearish: {
     key: "bearish",
@@ -120,6 +140,7 @@ export const PRESETS: Record<Preset["key"], Preset> = {
     rsi1h: [44, 47],
     rsi30m: [42, 44],
     requireFalling: true,
+    shaRequired: { day: true, hour: true, halfHour: true },
   },
 };
 
@@ -151,6 +172,7 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
       "https://api-gcp.binance.com",
       "https://data-api.binance.vision",
     ],
+    apiPath: "/api/v3",
     intervals: { day: "1d", hour: "1h", halfHour: "30m" },
     streamUrl: "wss://stream.binance.com:9443/stream",
     streamParams: (symbols) => symbols.map((symbol) => `${symbol.toLowerCase()}@ticker`),
@@ -160,12 +182,38 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     // weight 2, inside the 6000/min budget, and about 30s. Only the first sweep
     // pays it: candles are cached until they close.
     minQuoteVolume: 0,
+    concurrency: 12,
+    pollIntervalMs: 5_000,
+    symbolSource: "exchangeInfo",
+  },
+  "binance-futures": {
+    key: "binance-futures",
+    label: "Binance Futures",
+    hosts: ["https://fapi.binance.com"],
+    apiPath: "/fapi/v1",
+    intervals: { day: "1d", hour: "1h", halfHour: "30m" },
+    // fstream.binance.com accepts the connection and acknowledges SUBSCRIBE,
+    // then sends nothing: no frames arrived on @ticker, @miniTicker, @aggTrade
+    // or @markPrice, while futures REST worked throughout. Live values come
+    // from polling the ticker snapshot instead, which needs one request for
+    // every symbol. Restore the socket here if it starts delivering.
+    streamUrl: null,
+    tradeUrl: (baseAsset) => `https://www.binance.com/en/futures/${baseAsset}USDT`,
+    changeScale: 1,
+    // Futures allows 2400 weight a minute, not spot's 6000, and a full 526-pair
+    // sweep at spot pacing spent roughly 3x that and earned a 418 IP ban. So:
+    // fewer pairs, a slower crawl, and a lazier ticker poll. $2M/24h still
+    // covers the whole liquid perpetual market.
+    minQuoteVolume: 2_000_000,
+    concurrency: 4,
+    pollIntervalMs: 15_000,
     symbolSource: "exchangeInfo",
   },
   mexc: {
     key: "mexc",
     label: "MEXC",
     hosts: ["https://api.mexc.com"],
+    apiPath: "/api/v3",
     intervals: { day: "1d", hour: "60m", halfHour: "30m" },
     // MEXC's socket connects from the browser but streams protobuf, not JSON,
     // so live values come from polling instead.
@@ -178,16 +226,17 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     // 300 costs ~900 proxy invocations a sweep, which the free tier absorbs.
     // Lower this to widen coverage, at the cost of proxy usage.
     minQuoteVolume: 100_000,
+    concurrency: 8,
+    pollIntervalMs: 5_000,
     symbolSource: "tickers",
   },
 };
 
 export const proxied = (exchange: Exchange, url: string) => (exchange.proxy ? exchange.proxy(url) : url);
-export const tickerUrl = (exchange: Exchange) => proxied(exchange, `${exchange.hosts[0]}/api/v3/ticker/24hr`);
+export const tickerUrl = (exchange: Exchange) => proxied(exchange, `${exchange.hosts[0]}${exchange.apiPath}/ticker/24hr`);
 
 export const REQUEST_TIMEOUT_MS = 12_000;
 export const RESCAN_INTERVAL_MS = 180_000;
-export const POLL_INTERVAL_MS = 5_000;
 export const FLUSH_INTERVAL_MS = 400;
 export const FLASH_MS = 900;
 const PROGRESS_BATCH = 15;
@@ -283,18 +332,18 @@ export function evaluate(coin: CoinResult, preset: Preset, price: number): Evalu
   const rsi30m = projectRsi(coin.rsi30mState, price);
   const rsi1hFalling = rsi1h < coin.rsi1hState.closed;
   const rsi30mFalling = rsi30m < coin.rsi30mState.closed;
-  const checks = [
-    coin.sha1d === preset.shaBullish,
-    coin.sha1h === preset.shaBullish,
-    coin.sha30m === preset.shaBullish,
-    inBand(rsi1h, preset.rsi1h) && (!preset.requireFalling || rsi1hFalling),
-    inBand(rsi30m, preset.rsi30m) && (!preset.requireFalling || rsi30mFalling),
-  ];
+  const checks: boolean[] = [];
+  if (preset.shaRequired.day) checks.push(coin.sha1d === preset.shaBullish);
+  if (preset.shaRequired.hour) checks.push(coin.sha1h === preset.shaBullish);
+  if (preset.shaRequired.halfHour) checks.push(coin.sha30m === preset.shaBullish);
+  checks.push(inBand(rsi1h, preset.rsi1h) && (!preset.requireFalling || rsi1hFalling));
+  checks.push(inBand(rsi30m, preset.rsi30m) && (!preset.requireFalling || rsi30mFalling));
   return {
     ...coin,
     rsi1h, rsi30m, rsi1hFalling, rsi30mFalling,
     match: checks.every(Boolean),
     score: checks.filter(Boolean).length,
+    total: checks.length,
   };
 }
 
@@ -334,7 +383,7 @@ async function fetchKlines(exchange: Exchange, host: string, symbol: string, int
   const key = `${exchange.key}|${symbol}|${interval}|${Math.floor(Date.now() / span)}`;
   const cached = klineCache.get(key);
   if (cached) return cached;
-  const url = `${host}/api/v3/klines?symbol=${encodeURIComponent(symbol)}&limit=160&interval=${interval}`;
+  const url = `${host}${exchange.apiPath}/klines?symbol=${encodeURIComponent(symbol)}&limit=160&interval=${interval}`;
   const klines = await withRetry(() => requestJson<Kline[]>(proxied(exchange, url)));
   // Keys carry their own candle bucket, so stale ones simply stop being read.
   if (klineCache.size > 600) klineCache.clear();
@@ -379,7 +428,7 @@ async function listSymbols(exchange: Exchange, host: string, tickers: Ticker[]) 
         .map((t) => [t.symbol, { symbol: t.symbol, baseAsset: t.symbol.slice(0, -4) }]),
     );
   }
-  const info = await requestJson<ExchangeInfo>(proxied(exchange, `${host}/api/v3/exchangeInfo`));
+  const info = await requestJson<ExchangeInfo>(proxied(exchange, `${host}${exchange.apiPath}/exchangeInfo`));
   return new Map(
     info.symbols
       .filter(
@@ -387,6 +436,7 @@ async function listSymbols(exchange: Exchange, host: string, tickers: Ticker[]) 
           s.quoteAsset === "USDT" &&
           s.status.toUpperCase() === "TRADING" &&
           s.isSpotTradingAllowed !== false &&
+          (s.contractType === undefined || s.contractType === "PERPETUAL") &&
           !EXCLUDED_BASES.has(s.baseAsset),
       )
       .map((s) => [s.symbol, { symbol: s.symbol, baseAsset: s.baseAsset }]),
@@ -397,7 +447,7 @@ async function fetchTickers(exchange: Exchange) {
   let lastError: unknown;
   for (const host of exchange.hosts) {
     try {
-      const tickers = await withRetry(() => requestJson<Ticker[]>(proxied(exchange, `${host}/api/v3/ticker/24hr`)));
+      const tickers = await withRetry(() => requestJson<Ticker[]>(proxied(exchange, `${host}${exchange.apiPath}/ticker/24hr`)));
       return { host, tickers };
     } catch (error) {
       lastError = error;
@@ -439,9 +489,7 @@ export async function runScan(
     durationMs: Date.now() - started,
   });
 
-  // The proxy is ours now, so the only ceiling is MEXC's own rate limit; the
-  // 3-way crawl was there to survive a public proxy's ~75 request budget.
-  const concurrency = exchange.proxy ? 8 : 12;
+  const concurrency = exchange.concurrency;
   const coins = await mapWithConcurrency(
     candidates,
     concurrency,
