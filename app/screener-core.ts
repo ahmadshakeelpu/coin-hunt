@@ -205,7 +205,9 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     // fewer pairs, a slower crawl, and a lazier ticker poll. $2M/24h still
     // covers the whole liquid perpetual market.
     minQuoteVolume: 2_000_000,
-    concurrency: 4,
+    // Weight 1 per candle request at this limit, so ~900 for a sweep against a
+    // 2400/min budget. Eight at a time lands near 1600/min with headroom.
+    concurrency: 8,
     pollIntervalMs: 15_000,
     symbolSource: "exchangeInfo",
   },
@@ -243,6 +245,13 @@ const PROGRESS_BATCH = 15;
 export const SHA_LENGTH_1 = 10;
 export const SHA_LENGTH_2 = 10;
 export const RSI_LENGTH = 14;
+/**
+ * Candles per request. Measured: dropping 160 -> 100 leaves RSI within 0.008
+ * and SHA identical, cuts the payload 37%, and halves the futures weight (that
+ * endpoint charges 1 below 100 and 2 above, on a 2400/min budget).
+ */
+const KLINE_LIMIT = 100;
+const SCAN_CACHE_VERSION = 3;
 const EXCLUDED_BASES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BRL", "GBP", "UAH", "BIDR", "AEUR"]);
 
 export async function requestJson<T>(url: string): Promise<T> {
@@ -362,6 +371,60 @@ const INTERVAL_MS: Record<string, number> = {
  */
 const klineCache = new Map<string, Kline[]>();
 
+const bucketOf = (interval: string) => Math.floor(Date.now() / (INTERVAL_MS[interval] ?? 30 * 60_000));
+
+type CachedScan = {
+  version: number;
+  buckets: [number, number, number];
+  coins: Array<Omit<CoinResult, "price" | "change24h" | "quoteVolume">>;
+};
+
+const scanCacheKey = (exchange: Exchange) => `coin-hunt:scan:${exchange.key}`;
+
+/**
+ * Indicators cannot change until the candle being built closes, so a reload
+ * inside the same 30m window can reuse the whole previous sweep and spend one
+ * ticker request instead of ~1450 candle requests.
+ */
+function loadCachedScan(exchange: Exchange): Map<string, CachedScan["coins"][number]> {
+  const empty = new Map<string, CachedScan["coins"][number]>();
+  if (typeof window === "undefined") return empty;
+  try {
+    const raw = window.localStorage.getItem(scanCacheKey(exchange));
+    if (!raw) return empty;
+    const cached = JSON.parse(raw) as CachedScan;
+    if (cached.version !== SCAN_CACHE_VERSION) return empty;
+    const current: [number, number, number] = [
+      bucketOf(exchange.intervals.day),
+      bucketOf(exchange.intervals.hour),
+      bucketOf(exchange.intervals.halfHour),
+    ];
+    if (current.some((bucket, i) => bucket !== cached.buckets[i])) return empty;
+    return new Map(cached.coins.map((coin) => [coin.symbol, coin]));
+  } catch {
+    return empty;
+  }
+}
+
+function saveCachedScan(exchange: Exchange, coins: CoinResult[]) {
+  if (typeof window === "undefined" || !coins.length) return;
+  try {
+    const payload: CachedScan = {
+      version: SCAN_CACHE_VERSION,
+      buckets: [
+        bucketOf(exchange.intervals.day),
+        bucketOf(exchange.intervals.hour),
+        bucketOf(exchange.intervals.halfHour),
+      ],
+      // Price, change and volume come from the ticker on every load anyway.
+      coins: coins.map(({ price: _p, change24h: _c, quoteVolume: _q, ...rest }) => rest),
+    };
+    window.localStorage.setItem(scanCacheKey(exchange), JSON.stringify(payload));
+  } catch {
+    // A full quota is not worth failing a scan over.
+  }
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Retries transient proxy failures so a 429 does not silently drop a symbol. */
@@ -383,7 +446,7 @@ async function fetchKlines(exchange: Exchange, host: string, symbol: string, int
   const key = `${exchange.key}|${symbol}|${interval}|${Math.floor(Date.now() / span)}`;
   const cached = klineCache.get(key);
   if (cached) return cached;
-  const url = `${host}${exchange.apiPath}/klines?symbol=${encodeURIComponent(symbol)}&limit=160&interval=${interval}`;
+  const url = `${host}${exchange.apiPath}/klines?symbol=${encodeURIComponent(symbol)}&limit=${KLINE_LIMIT}&interval=${interval}`;
   const klines = await withRetry(() => requestJson<Kline[]>(proxied(exchange, url)));
   // Keys carry their own candle bucket, so stale ones simply stop being read.
   if (klineCache.size > 600) klineCache.clear();
@@ -417,6 +480,43 @@ async function mapWithConcurrency<T, R>(
   return settled();
 }
 
+type SymbolInfo = { symbol: string; baseAsset: string };
+
+/**
+ * exchangeInfo is ~16MB on Binance and the listing set barely moves, so it is
+ * cached for a day. Without this every load spent most of its time downloading
+ * a symbol list that had not changed.
+ */
+function cachedSymbols(exchange: Exchange): Map<string, SymbolInfo> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(`coin-hunt:symbols:${exchange.key}`);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as { version: number; day: number; symbols: SymbolInfo[] };
+    if (cached.version !== SCAN_CACHE_VERSION) return null;
+    if (cached.day !== Math.floor(Date.now() / 86_400_000)) return null;
+    return new Map(cached.symbols.map((entry) => [entry.symbol, entry]));
+  } catch {
+    return null;
+  }
+}
+
+function storeSymbols(exchange: Exchange, symbols: Map<string, SymbolInfo>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      `coin-hunt:symbols:${exchange.key}`,
+      JSON.stringify({
+        version: SCAN_CACHE_VERSION,
+        day: Math.floor(Date.now() / 86_400_000),
+        symbols: [...symbols.values()],
+      }),
+    );
+  } catch {
+    // Quota failures just mean the next load refetches the list.
+  }
+}
+
 /** Resolves the tradeable USDT symbols and their base assets. */
 async function listSymbols(exchange: Exchange, host: string, tickers: Ticker[]) {
   if (exchange.symbolSource === "tickers") {
@@ -428,8 +528,10 @@ async function listSymbols(exchange: Exchange, host: string, tickers: Ticker[]) 
         .map((t) => [t.symbol, { symbol: t.symbol, baseAsset: t.symbol.slice(0, -4) }]),
     );
   }
+  const reusable = cachedSymbols(exchange);
+  if (reusable) return reusable;
   const info = await requestJson<ExchangeInfo>(proxied(exchange, `${host}${exchange.apiPath}/exchangeInfo`));
-  return new Map(
+  const resolved = new Map(
     info.symbols
       .filter(
         (s) =>
@@ -441,6 +543,8 @@ async function listSymbols(exchange: Exchange, host: string, tickers: Ticker[]) 
       )
       .map((s) => [s.symbol, { symbol: s.symbol, baseAsset: s.baseAsset }]),
   );
+  storeSymbols(exchange, resolved);
+  return resolved;
 }
 
 async function fetchTickers(exchange: Exchange) {
@@ -481,6 +585,10 @@ export async function runScan(
     .filter((ticker) => symbols.has(ticker.symbol) && Number(ticker.quoteVolume) > exchange.minQuoteVolume)
     .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume));
 
+  // Anything still inside its candle bucket is reused, so a reload or a hop
+  // between the bullish and bearish page of the same exchange costs nothing.
+  const cached = loadCachedScan(exchange);
+
   const snapshot = (coins: CoinResult[]): ScanResponse => ({
     coins: rank(coins, preset),
     scanned: coins.length,
@@ -495,6 +603,14 @@ export async function runScan(
     concurrency,
     async (ticker) => {
       const info = symbols.get(ticker.symbol)!;
+      const live = {
+        price: Number(ticker.lastPrice),
+        change24h: Number(ticker.priceChangePercent) * exchange.changeScale,
+        quoteVolume: Number(ticker.quoteVolume),
+      };
+      const reusable = cached.get(ticker.symbol);
+      if (reusable) return { ...reusable, ...live };
+
       const [day, hour, halfHour] = await Promise.all([
         fetchKlines(exchange, host, ticker.symbol, exchange.intervals.day),
         fetchKlines(exchange, host, ticker.symbol, exchange.intervals.hour),
@@ -503,9 +619,7 @@ export async function runScan(
       return {
         symbol: ticker.symbol,
         baseAsset: info.baseAsset,
-        price: Number(ticker.lastPrice),
-        change24h: Number(ticker.priceChangePercent) * exchange.changeScale,
-        quoteVolume: Number(ticker.quoteVolume),
+        ...live,
         sha1d: smoothedHeikinAshiBullish(day),
         sha1h: smoothedHeikinAshiBullish(hour),
         sha30m: smoothedHeikinAshiBullish(halfHour),
@@ -517,6 +631,7 @@ export async function runScan(
   );
 
   if (!coins.length) throw new Error(`${exchange.label} connected, but candle requests were blocked. Please disable any strict tracker blocker and retry.`);
+  saveCachedScan(exchange, coins);
   return snapshot(coins);
 }
 

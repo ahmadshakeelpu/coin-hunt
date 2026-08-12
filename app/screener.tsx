@@ -414,7 +414,13 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
               {preset.requireFalling ? " while still falling." : "."}
             </p>
           </div>
-          <button className="refresh-button" onClick={load} disabled={loading}>{loading ? "Scanning…" : "↻ Rescan signals"}</button>
+          <button className="refresh-button" onClick={load} disabled={loading}>
+            {loading
+              ? data && data.requested
+                ? `Scanning ${data.scanned}/${data.requested}`
+                : "Scanning…"
+              : "↻ Rescan signals"}
+          </button>
         </section>
 
         <section className="rule-strip" aria-label="Active signal rules">
