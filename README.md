@@ -31,10 +31,11 @@ A pair is an exact match when all five conditions hold on closed candles.
 | 30 min | Smoothed Heikin Ashi green |
 | 1 hour | RSI(14) between 53 and 57 |
 | 30 min | RSI(14) between 56 and 58 |
+| 24h | Price change **at or above +7%** |
 
 A bullish coin can therefore be an exact match with 1H SHA still red. The column
 still shows it, and the rule strip labels it "optional", but it is not one of the
-four checks. Bearish requires all three SHA timeframes, so it scores out of five.
+five checks. Bearish requires all three SHA timeframes, so it scores out of six.
 
 **Bearish**
 
@@ -43,12 +44,20 @@ four checks. Bearish requires all three SHA timeframes, so it scores out of five
 | 1 day / 1 hour / 30 min | Smoothed Heikin Ashi red |
 | 1 hour | RSI(14) between 44 and 47 **and falling** |
 | 30 min | RSI(14) between 42 and 44 **and falling** |
+| 24h | Price change **at or below −7%** |
 
 "Falling" compares the live RSI against the last closed candle's, so it tracks
 the market rather than the last sweep. **Both presets show a ↓ or ↑** next to
 every RSI reading — bearish requires the direction, bullish does not, but seeing
 whether a reading is climbing into its band or falling out of it is the point of
 watching it live.
+
+24h change is evaluated live, like RSI, so a coin crossing ±7% moves in or out
+of matching as it happens. The 24h cell turns lime when it satisfies the gate.
+It is a hard filter: at a typical moment only ~28 of Binance's 671 USDT pairs are
+at or above +7% and ~79 at or below −7%, so combined with the rest of the rules
+exact matches are meant to be rare. Both thresholds live in `PRESETS` in
+`app/screener-core.ts`.
 
 Smoothed Heikin Ashi is a double EMA (10/10): the OHLC series is smoothed,
 converted to Heikin Ashi, then smoothed again. Pairs that miss are still listed

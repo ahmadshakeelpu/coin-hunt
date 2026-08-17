@@ -79,6 +79,11 @@ export type Preset = {
    * being an exact match when everything else lines up.
    */
   shaRequired: { day: boolean; hour: boolean; halfHour: boolean };
+  /**
+   * Required 24h price change, in percent. Bullish sets a floor, bearish a
+   * ceiling. Evaluated live, since 24h change moves with the stream.
+   */
+  change24h: { min?: number; max?: number };
 };
 
 export type Exchange = {
@@ -132,6 +137,7 @@ export const PRESETS: Record<Preset["key"], Preset> = {
     rsi30m: [56, 58],
     requireFalling: false,
     shaRequired: { day: true, hour: false, halfHour: true },
+    change24h: { min: 7 },
   },
   bearish: {
     key: "bearish",
@@ -141,6 +147,7 @@ export const PRESETS: Record<Preset["key"], Preset> = {
     rsi30m: [42, 44],
     requireFalling: true,
     shaRequired: { day: true, hour: true, halfHour: true },
+    change24h: { max: -7 },
   },
 };
 
@@ -335,8 +342,18 @@ export function projectRsi(state: RsiState, price: number, length = RSI_LENGTH) 
 
 const inBand = (value: number, [min, max]: [number, number]) => value >= min && value <= max;
 
-/** Scores a coin against a preset using a live price. */
-export function evaluate(coin: CoinResult, preset: Preset, price: number): EvaluatedCoin {
+/** True when a 24h change satisfies the preset's floor or ceiling. */
+export const changeInRange = (change: number, bounds: Preset["change24h"]) =>
+  (bounds.min === undefined || change >= bounds.min) &&
+  (bounds.max === undefined || change <= bounds.max);
+
+/** Scores a coin against a preset using live price and 24h change. */
+export function evaluate(
+  coin: CoinResult,
+  preset: Preset,
+  price: number,
+  change24h: number = coin.change24h,
+): EvaluatedCoin {
   const rsi1h = projectRsi(coin.rsi1hState, price);
   const rsi30m = projectRsi(coin.rsi30mState, price);
   const rsi1hFalling = rsi1h < coin.rsi1hState.closed;
@@ -347,8 +364,10 @@ export function evaluate(coin: CoinResult, preset: Preset, price: number): Evalu
   if (preset.shaRequired.halfHour) checks.push(coin.sha30m === preset.shaBullish);
   checks.push(inBand(rsi1h, preset.rsi1h) && (!preset.requireFalling || rsi1hFalling));
   checks.push(inBand(rsi30m, preset.rsi30m) && (!preset.requireFalling || rsi30mFalling));
+  checks.push(changeInRange(change24h, preset.change24h));
   return {
     ...coin,
+    change24h,
     rsi1h, rsi30m, rsi1hFalling, rsi30mFalling,
     match: checks.every(Boolean),
     score: checks.filter(Boolean).length,
@@ -567,8 +586,8 @@ async function fetchTickers(exchange: Exchange) {
  */
 function rank(coins: CoinResult[], preset: Preset) {
   return [...coins].sort((a, b) => {
-    const left = evaluate(a, preset, a.price);
-    const right = evaluate(b, preset, b.price);
+    const left = evaluate(a, preset, a.price, a.change24h);
+    const right = evaluate(b, preset, b.price, b.change24h);
     return Number(right.match) - Number(left.match) || right.score - left.score || b.quoteVolume - a.quoteVolume;
   });
 }

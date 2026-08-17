@@ -4,7 +4,7 @@ import Link from "next/link";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EXCHANGES, FLASH_MS, FLUSH_INTERVAL_MS, PRESETS, RESCAN_INTERVAL_MS,
-  SHA_LENGTH_1, SHA_LENGTH_2, evaluate, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
+  SHA_LENGTH_1, SHA_LENGTH_2, changeInRange, evaluate, fetchSupplyMap, formatPrice, formatUsd, requestJson, runScan, tickerUrl,
   type EvaluatedCoin, type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
 } from "./screener-core";
 import {
@@ -74,7 +74,9 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
     <tr>
       <td><div className="coin"><span className="coin-icon">{coin.baseAsset.slice(0, 2)}</span><div><div className="coin-name">{coin.baseAsset}</div><div className="coin-pair">{coin.symbol}</div></div></div></td>
       <td className={`mono tick ${coin.dir ?? ""}`}>${formatPrice(coin.price)}</td>
-      <td className={`mono ${coin.change24h >= 0 ? "positive" : "negative"}`}>{coin.change24h >= 0 ? "+" : ""}{coin.change24h.toFixed(2)}%</td>
+      <td className={`mono change ${changeInRange(coin.change24h, preset.change24h) ? "in-range" : ""} ${coin.change24h >= 0 ? "positive" : "negative"}`}>
+        {coin.change24h >= 0 ? "+" : ""}{coin.change24h.toFixed(2)}%
+      </td>
       <td className="mono">{formatUsd(coin.marketCap)}</td>
       <td className="mono">{formatUsd(coin.quoteVolume)}</td>
       <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
@@ -304,9 +306,8 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
         const price = tick?.price ?? coin.price;
         const circulating = supply[coin.baseAsset];
         return {
-          ...evaluate(coin, preset, price),
+          ...evaluate(coin, preset, price, tick?.change24h ?? coin.change24h),
           price,
-          change24h: tick?.change24h ?? coin.change24h,
           quoteVolume: tick?.quoteVolume ?? coin.quoteVolume,
           marketCap: circulating ? circulating * price : 0,
           dir: tick?.dir ?? null,
@@ -367,8 +368,9 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const updated = data
     ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : "—";
+  // Three SHA slots (1H optional on bullish), two RSI bands, one 24h gate.
   const checksTotal = (preset.shaRequired.day ? 1 : 0) + (preset.shaRequired.hour ? 1 : 0)
-    + (preset.shaRequired.halfHour ? 1 : 0) + 2;
+    + (preset.shaRequired.halfHour ? 1 : 0) + 3;
   const shaLabel = preset.shaBullish ? "SHA · GREEN" : "SHA · RED";
   const band = (range: [number, number]) =>
     preset.requireFalling ? `${range[1].toFixed(1)} → ${range[0].toFixed(1)} ↓` : `${range[0].toFixed(1)} — ${range[1].toFixed(1)}`;
@@ -409,9 +411,10 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
             <div className="eyebrow">{exchange.label} · {preset.label}</div>
             <h1>{preset.shaBullish ? <>Find alignment.<br />Before the crowd.</> : <>Catch the breakdown.<br />Before the bounce.</>}</h1>
             <p>
-              Scanning liquid {exchange.label} Spot USDT pairs using closed candles. An exact signal needs all three
-              Smoothed Heikin Ashi timeframes {preset.shaBullish ? "green" : "red"} and both RSI windows in band
-              {preset.requireFalling ? " while still falling." : "."}
+              Scanning liquid {exchange.label} USDT pairs using closed candles. An exact signal needs the Smoothed
+              Heikin Ashi timeframes {preset.shaBullish ? "green" : "red"}, both RSI windows in band
+              {preset.requireFalling ? " while still falling" : ""}, and 24h change{" "}
+              {preset.change24h.min !== undefined ? `at or above +${preset.change24h.min}%` : `at or below ${preset.change24h.max}%`}.
             </p>
           </div>
           <button className="refresh-button" onClick={load} disabled={loading}>
@@ -434,6 +437,12 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
           <div className="rule"><div className="rule-k">30 Minutes</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
           <div className="rule"><div className="rule-k">1H RSI (14)</div><div className="rule-v">{band(preset.rsi1h)}</div></div>
           <div className="rule"><div className="rule-k">30m RSI (14)</div><div className="rule-v">{band(preset.rsi30m)}</div></div>
+          <div className="rule">
+            <div className="rule-k">24h change</div>
+            <div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>
+              {preset.change24h.min !== undefined ? `≥ +${preset.change24h.min}%` : `≤ ${preset.change24h.max}%`}
+            </div>
+          </div>
         </section>
 
         <div className="status-row">
