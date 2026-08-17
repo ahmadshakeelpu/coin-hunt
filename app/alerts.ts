@@ -19,6 +19,7 @@ export type AlertEvent = {
 
 export const ALERTS_STORAGE_KEY = "coin-hunt:alerts-enabled";
 export const SOUND_STORAGE_KEY = "coin-hunt:alerts-sound";
+export const CHANGE_GATE_STORAGE_KEY = "coin-hunt:change-gate";
 
 export function readPermission(): AlertPermission {
   if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
@@ -59,6 +60,8 @@ export const loadPreference = () => readFlag(ALERTS_STORAGE_KEY, false);
 export const savePreference = (enabled: boolean) => writeFlag(ALERTS_STORAGE_KEY, enabled);
 export const loadSoundPreference = () => readFlag(SOUND_STORAGE_KEY, true);
 export const saveSoundPreference = (enabled: boolean) => writeFlag(SOUND_STORAGE_KEY, enabled);
+export const loadChangeGatePreference = () => readFlag(CHANGE_GATE_STORAGE_KEY, true);
+export const saveChangeGatePreference = (enabled: boolean) => writeFlag(CHANGE_GATE_STORAGE_KEY, enabled);
 
 /**
  * One AudioContext for the page. Browsers cap how many can exist, and creating

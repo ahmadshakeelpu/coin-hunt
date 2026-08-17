@@ -54,6 +54,12 @@ watching it live.
 
 24h change is evaluated live, like RSI, so a coin crossing ±7% moves in or out
 of matching as it happens. The 24h cell turns lime when it satisfies the gate.
+
+**The condition can be switched off** with the `24h ≥ +7%` / `24h: any` button
+next to the filter, and the choice is remembered. Switching it off removes the
+check from the score rather than passing it for free, so the denominator drops
+from five back to four on bullish and six to five on bearish. It re-scores what
+is already loaded rather than starting a new sweep.
 It is a hard filter: at a typical moment only ~28 of Binance's 671 USDT pairs are
 at or above +7% and ~79 at or below −7%, so combined with the rest of the rules
 exact matches are meant to be rare. Both thresholds live in `PRESETS` in

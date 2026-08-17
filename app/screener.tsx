@@ -8,8 +8,8 @@ import {
   type EvaluatedCoin, type Exchange, type LiveTick, type Preset, type ScanResponse, type Ticker,
 } from "./screener-core";
 import {
-  chime, loadPreference, loadSoundPreference, notifyMatches, readPermission, requestPermission,
-  savePreference, saveSoundPreference,
+  chime, loadChangeGatePreference, loadPreference, loadSoundPreference, notifyMatches, readPermission,
+  requestPermission, saveChangeGatePreference, savePreference, saveSoundPreference,
   type AlertEvent, type AlertPermission,
 } from "./alerts";
 
@@ -111,7 +111,16 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
 
 export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["key"]; presetKey: Preset["key"] }) {
   const exchange = EXCHANGES[exchangeKey];
-  const preset = PRESETS[presetKey];
+  const basePreset = PRESETS[presetKey];
+  const [changeGate, setChangeGate] = useState(true);
+
+  // Clearing the bounds removes the check from the score rather than making it
+  // pass for free. The scan itself still runs off basePreset, so toggling this
+  // re-scores what is already loaded instead of triggering a fresh sweep.
+  const preset = useMemo(
+    () => (changeGate ? basePreset : { ...basePreset, change24h: {} }),
+    [basePreset, changeGate],
+  );
 
   const [data, setData] = useState<ScanResponse | null>(null);
   const [live, setLive] = useState<Record<string, LiveTick>>({});
@@ -156,7 +165,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
       // Exchanges reject datacenter IPs, so the scan runs from the visitor's
       // own connection rather than from a server.
       const [scan, supplyMap] = await Promise.all([
-        runScan(exchange, preset, setData),
+        runScan(exchange, basePreset, setData),
         fetchSupplyMap(),
       ]);
       setData(scan);
@@ -167,7 +176,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     } finally {
       setLoading(false);
     }
-  }, [exchange, preset]);
+  }, [exchange, basePreset]);
 
   useEffect(() => {
     load();
@@ -261,6 +270,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     setPermission(current);
     setAlertsOn(current === "granted" && loadPreference());
     setSoundOn(loadSoundPreference());
+    setChangeGate(loadChangeGatePreference());
   }, []);
 
   const dismissToast = useCallback((id: string) => {
@@ -287,6 +297,13 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     savePreference(true);
     if (soundOn) chime(preset.key);
   }, [alertsOn, soundOn, preset]);
+
+  const toggleChangeGate = useCallback(() => {
+    setChangeGate((current) => {
+      saveChangeGatePreference(!current);
+      return !current;
+    });
+  }, []);
 
   const toggleSound = useCallback(() => {
     setSoundOn((current) => {
@@ -368,9 +385,10 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const updated = data
     ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : "—";
-  // Three SHA slots (1H optional on bullish), two RSI bands, one 24h gate.
+  // Three SHA slots (1H optional on bullish), two RSI bands, and the 24h gate
+  // when it is switched on.
   const checksTotal = (preset.shaRequired.day ? 1 : 0) + (preset.shaRequired.hour ? 1 : 0)
-    + (preset.shaRequired.halfHour ? 1 : 0) + 3;
+    + (preset.shaRequired.halfHour ? 1 : 0) + 2 + (changeGate ? 1 : 0);
   const shaLabel = preset.shaBullish ? "SHA · GREEN" : "SHA · RED";
   const band = (range: [number, number]) =>
     preset.requireFalling ? `${range[1].toFixed(1)} → ${range[0].toFixed(1)} ↓` : `${range[0].toFixed(1)} — ${range[1].toFixed(1)}`;
@@ -413,8 +431,10 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
             <p>
               Scanning liquid {exchange.label} USDT pairs using closed candles. An exact signal needs the Smoothed
               Heikin Ashi timeframes {preset.shaBullish ? "green" : "red"}, both RSI windows in band
-              {preset.requireFalling ? " while still falling" : ""}, and 24h change{" "}
-              {preset.change24h.min !== undefined ? `at or above +${preset.change24h.min}%` : `at or below ${preset.change24h.max}%`}.
+              {preset.requireFalling ? " while still falling" : ""}
+              {changeGate
+                ? `, and 24h change ${basePreset.change24h.min !== undefined ? `at or above +${basePreset.change24h.min}%` : `at or below ${basePreset.change24h.max}%`}.`
+                : ". The 24h change condition is currently switched off."}
             </p>
           </div>
           <button className="refresh-button" onClick={load} disabled={loading}>
@@ -438,9 +458,13 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
           <div className="rule"><div className="rule-k">1H RSI (14)</div><div className="rule-v">{band(preset.rsi1h)}</div></div>
           <div className="rule"><div className="rule-k">30m RSI (14)</div><div className="rule-v">{band(preset.rsi30m)}</div></div>
           <div className="rule">
-            <div className="rule-k">24h change</div>
-            <div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>
-              {preset.change24h.min !== undefined ? `≥ +${preset.change24h.min}%` : `≤ ${preset.change24h.max}%`}
+            <div className="rule-k">24h change{changeGate ? "" : " · off"}</div>
+            <div className={`rule-v ${changeGate ? (preset.shaBullish ? "green" : "red") : "muted"}`}>
+              {changeGate
+                ? basePreset.change24h.min !== undefined
+                  ? `≥ +${basePreset.change24h.min}%`
+                  : `≤ ${basePreset.change24h.max}%`
+                : "ANY"}
             </div>
           </div>
         </section>
@@ -471,6 +495,22 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
               }
             >
               {alertsOn ? (permission === "granted" ? "🔔 Alerts on" : "🔔 On-page only") : "🔔 Alert me"}
+            </button>
+            <button
+              className={`filter-button ${changeGate ? "active" : ""}`}
+              onClick={toggleChangeGate}
+              aria-pressed={changeGate}
+              title={
+                changeGate
+                  ? "24h change is required for a match — click to ignore it"
+                  : "24h change is ignored — click to require it again"
+              }
+            >
+              {changeGate
+                ? basePreset.change24h.min !== undefined
+                  ? `24h ≥ +${basePreset.change24h.min}%`
+                  : `24h ≤ ${basePreset.change24h.max}%`
+                : "24h: any"}
             </button>
             <button
               className={`filter-button sound-toggle ${soundOn ? "active" : ""}`}

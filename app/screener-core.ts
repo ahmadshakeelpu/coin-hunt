@@ -364,7 +364,11 @@ export function evaluate(
   if (preset.shaRequired.halfHour) checks.push(coin.sha30m === preset.shaBullish);
   checks.push(inBand(rsi1h, preset.rsi1h) && (!preset.requireFalling || rsi1hFalling));
   checks.push(inBand(rsi30m, preset.rsi30m) && (!preset.requireFalling || rsi30mFalling));
-  checks.push(changeInRange(change24h, preset.change24h));
+  // Empty bounds mean the gate is switched off, so it drops out of the score
+  // entirely rather than counting as a free pass.
+  if (preset.change24h.min !== undefined || preset.change24h.max !== undefined) {
+    checks.push(changeInRange(change24h, preset.change24h));
+  }
   return {
     ...coin,
     change24h,
