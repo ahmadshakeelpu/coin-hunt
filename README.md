@@ -26,18 +26,29 @@ A pair is an exact match when all five conditions hold on closed candles.
 
 | Timeframe | Condition |
 | --- | --- |
+| 1 day / 1 hour / 30 min | **Uptrend** — price above EMA(50) and that EMA rising |
 | 1 day | Smoothed Heikin Ashi green |
 | 1 hour | Smoothed Heikin Ashi — **advisory, does not gate the match** |
 | 30 min | Smoothed Heikin Ashi green |
-| 1 hour | RSI(14) between 53 and 57 |
-| 30 min | RSI(14) between 56 and 58 |
+| 1 hour | RSI(14) between 53 and 56 |
+| 30 min | RSI(14) **above the 1H RSI** — the shorter timeframe leading |
 | 24h | Price change **at or above +7%** |
+
+Eight checks in total. "Uptrend" is deliberately separate from Smoothed Heikin
+Ashi: SHA is a smoothed candle-colour signal, while this is a position-and-slope
+test against a 50-period EMA. Both have to hold, so a coin popping above a flat
+or falling average does not read as trending. The Trend column shows each
+timeframe's state.
+
+The 30m RSI has no fixed band on the bullish preset: it only has to sit above
+the 1H reading, which is momentum accelerating into the shorter timeframe.
 
 A bullish coin can therefore be an exact match with 1H SHA still red. The column
 still shows it, and the rule strip labels it "optional", but it is not one of the
 five checks. Bearish requires all three SHA timeframes, so it scores out of six.
 
-**Bearish**
+**Bearish** — unchanged; only the bullish rules were respecified, so bearish has
+no trend gate and keeps its fixed 30m band.
 
 | Timeframe | Condition |
 | --- | --- |
@@ -93,11 +104,20 @@ listings. The rest are dormant books where the indicators would be meaningless,
 and most lack the candle history anyway. Lower `minQuoteVolume` in
 `app/screener-core.ts` to widen it, at the cost of proxy invocations.
 
-## Filtering
+## Sorting and filtering
+
+Column headers sort, exchange-style: click for descending, again for ascending,
+a third time to return to the scan's own ranking. The arrow shows which column
+is active. Asset, price, 24h change, market cap, volume, both RSI columns and
+the signal score are all sortable.
+
+Order is recomputed every 2s rather than on every tick. Live values change
+several times a second and re-sorting at that rate would make rows jump under
+the cursor while you were reading them.
 
 Alongside search there is a filter on how many checks a row passes: all coins,
 within 2, within 1, or exact matches only. It runs on the live evaluation, so a
-coin entering or leaving the band moves between filters as it happens.
+coin entering or leaving a band moves between filters as it happens.
 
 ## Match alerts
 

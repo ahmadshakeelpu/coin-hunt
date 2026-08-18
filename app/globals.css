@@ -67,7 +67,7 @@ h1 { font-size: clamp(38px, 5.5vw, 76px); line-height: .95; letter-spacing: -.07
 .refresh-button:disabled { opacity: .6; cursor: progress; }
 
 .rule-strip {
-  display: grid; grid-template-columns: repeat(6, 1fr); border: 1px solid var(--line);
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); border: 1px solid var(--line);
   border-radius: 13px; overflow: hidden; margin-bottom: 18px; background: var(--panel);
 }
 .rule { padding: 18px 20px; border-right: 1px solid var(--line); min-width: 0; }
@@ -96,7 +96,7 @@ h1 { font-size: clamp(38px, 5.5vw, 76px); line-height: .95; letter-spacing: -.07
 @keyframes bell-in { 0% { transform: scale(.94); } 60% { transform: scale(1.04); } }
 
 .table-wrap { border: 1px solid var(--line); border-radius: 13px; overflow-x: auto; background: rgba(16,20,17,.72); }
-table { width: 100%; border-collapse: collapse; min-width: 1120px; }
+table { width: 100%; border-collapse: collapse; min-width: 1260px; }
 th {
   padding: 13px 18px; color: #687068; font-size: 9px; letter-spacing: .11em; text-transform: uppercase;
   font-weight: 600; text-align: left; background: #0d100e; border-bottom: 1px solid var(--line);
@@ -214,3 +214,21 @@ tbody tr:hover { background: rgba(255,255,255,.017); }
 
 /* Marks a 24h change that satisfies the preset's floor or ceiling. */
 .change.in-range { color: var(--lime); font-weight: 650; }
+
+/* Sortable headers, with a neutral glyph until a column is chosen. */
+.th-sort {
+  display: inline-flex; align-items: center; gap: 5px; background: none; border: 0; padding: 0;
+  color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit;
+}
+.th-sort:hover { color: var(--ink); }
+.th-sort.active { color: var(--lime); }
+.th-arrow { font-size: 9px; opacity: .55; }
+.th-sort.active .th-arrow { opacity: 1; }
+
+/* 1D / 1H / 30m EMA(50) trend state. */
+.trendset { display: inline-flex; gap: 3px; }
+.trendset-cell {
+  font: 9px var(--font-geist-mono); padding: 3px 5px; border-radius: 3px;
+  border: 1px solid #2c332c; color: #5f665e;
+}
+.trendset-cell.on { color: var(--green); border-color: #3d5a45; background: rgba(92,225,163,.09); }

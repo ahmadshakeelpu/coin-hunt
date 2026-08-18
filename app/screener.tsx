@@ -23,6 +23,22 @@ const STREAM_CHUNK = 150;
  * has to diff, which is what makes 670 rows feel slow rather than the scan.
  */
 const VISIBLE_ROWS = 150;
+/**
+ * Row order is recomputed on this cadence rather than on every live tick. Live
+ * values change several times a second and re-sorting that often would make the
+ * table jump under the cursor.
+ */
+const REORDER_INTERVAL_MS = 2000;
+
+type SortKey = "asset" | "price" | "change24h" | "marketCap" | "quoteVolume" | "rsi1h" | "rsi30m" | "score";
+
+const SORTABLE: Array<{ key: SortKey; label: string }> = [
+  { key: "asset", label: "Asset" },
+  { key: "price", label: "Price" },
+  { key: "change24h", label: "24H" },
+  { key: "marketCap", label: "Market cap" },
+  { key: "quoteVolume", label: "24H volume" },
+];
 
 const NAV_GROUPS = [
   {
@@ -43,14 +59,31 @@ const NAV_GROUPS = [
   },
 ] as const;
 
+/** 1D / 1H / 30m trend at a glance, lit when price leads a rising EMA(50). */
+function Trend({ day, hour, halfHour }: { day: boolean; hour: boolean; halfHour: boolean }) {
+  return (
+    <span className="trendset">
+      {([["D", day], ["1H", hour], ["30m", halfHour]] as const).map(([label, on]) => (
+        <span key={label} className={`trendset-cell ${on ? "on" : ""}`} title={`${label} ${on ? "uptrend" : "not trending up"}`}>
+          {label}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function Candle({ bull }: { bull: boolean }) {
   return <span className={`candle ${bull ? "bull" : "bear"}`}><i />{bull ? "Green" : "Red"}</span>;
 }
 
-function Rsi({ value, band, falling, requireFalling }: {
+function Rsi({ value, band, falling, requireFalling, leads }: {
   value: number; band: [number, number]; falling: boolean; requireFalling: boolean;
+  /** When set, the cell is judged on leading the 1H reading rather than a band. */
+  leads?: boolean;
 }) {
-  const ok = value >= band[0] && value <= band[1] && (!requireFalling || falling);
+  const ok = leads === undefined
+    ? value >= band[0] && value <= band[1] && (!requireFalling || falling)
+    : leads;
   // The arrow shows on both presets. Only bearish requires the direction, but
   // knowing whether a bullish reading is climbing into its band or falling out
   // of it is the whole point of watching it live.
@@ -79,9 +112,18 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
       </td>
       <td className="mono">{formatUsd(coin.marketCap)}</td>
       <td className="mono">{formatUsd(coin.quoteVolume)}</td>
+      <td><Trend day={coin.up1d} hour={coin.up1h} halfHour={coin.up30m} /></td>
       <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
       <td><Rsi value={coin.rsi1h} band={preset.rsi1h} falling={coin.rsi1hFalling} requireFalling={preset.requireFalling} /></td>
-      <td><Rsi value={coin.rsi30m} band={preset.rsi30m} falling={coin.rsi30mFalling} requireFalling={preset.requireFalling} /></td>
+      <td>
+        <Rsi
+          value={coin.rsi30m}
+          band={preset.rsi30m}
+          falling={coin.rsi30mFalling}
+          requireFalling={preset.requireFalling}
+          leads={preset.rsi30mLeads ? coin.rsi30m > coin.rsi1h : undefined}
+        />
+      </td>
       <td><span className={coin.match ? "match-badge" : "near-badge"}>{coin.match ? "Exact match" : `${coin.score}/${coin.total} aligned`}</span></td>
       <td><a className="chart-link" href={tradeUrl(coin.baseAsset)} target="_blank" rel="noreferrer" aria-label={`Open ${coin.baseAsset} chart`}>↗</a></td>
     </tr>
@@ -100,6 +142,9 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
     a.marketCap === b.marketCap &&
     a.rsi1h === b.rsi1h &&
     a.rsi30m === b.rsi30m &&
+    a.up1d === b.up1d &&
+    a.up1h === b.up1h &&
+    a.up30m === b.up30m &&
     a.rsi1hFalling === b.rsi1hFalling &&
     a.rsi30mFalling === b.rsi30mFalling &&
     a.dir === b.dir &&
@@ -132,6 +177,8 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const [showAll, setShowAll] = useState(false);
   /** Minimum passing checks a row must have to be listed. */
   const [minScore, setMinScore] = useState(0);
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
+  const [order, setOrder] = useState<string[]>([]);
   const [signalOnly, setSignalOnly] = useState<"all" | "rsi" | "sha">("all");
 
   const [alertsOn, setAlertsOn] = useState(false);
@@ -345,7 +392,44 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   const evaluatedRef = useRef(evaluated);
   evaluatedRef.current = evaluated;
 
-  const visible = useMemo(() => (showAll ? coins : coins.slice(0, VISIBLE_ROWS)), [coins, showAll]);
+  const toggleSort = useCallback((key: SortKey) => {
+    setSort((current) => {
+      if (current?.key !== key) return { key, dir: key === "asset" ? "asc" : "desc" };
+      if (current.dir === "desc") return { key, dir: "asc" };
+      // Third click returns to the scan's own ranking.
+      return null;
+    });
+  }, []);
+
+  // Recomputed on a timer so a moving price does not reshuffle rows continuously.
+  useEffect(() => {
+    const rank = () => {
+      const rows = evaluatedRef.current;
+      if (!sort) {
+        setOrder(rows.map((coin) => coin.symbol));
+        return;
+      }
+      const factor = sort.dir === "asc" ? 1 : -1;
+      const sorted = [...rows].sort((a, b) => {
+        if (sort.key === "asset") return factor * a.baseAsset.localeCompare(b.baseAsset);
+        const left = a[sort.key as keyof typeof a] as number;
+        const right = b[sort.key as keyof typeof b] as number;
+        return factor * ((left ?? 0) - (right ?? 0));
+      });
+      setOrder(sorted.map((coin) => coin.symbol));
+    };
+    rank();
+    const timer = window.setInterval(rank, REORDER_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [sort, data]);
+
+  const ordered = useMemo(() => {
+    if (!order.length) return coins;
+    const rank = new Map(order.map((symbol, index) => [symbol, index]));
+    return [...coins].sort((a, b) => (rank.get(a.symbol) ?? 1e9) - (rank.get(b.symbol) ?? 1e9));
+  }, [coins, order]);
+
+  const visible = useMemo(() => (showAll ? ordered : ordered.slice(0, VISIBLE_ROWS)), [ordered, showAll]);
   const matches = evaluated.filter((coin) => coin.match).length;
   const matchKey = evaluated.filter((coin) => coin.match).map((coin) => coin.symbol).sort().join(",");
 
@@ -387,8 +471,12 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
     : "—";
   // Three SHA slots (1H optional on bullish), two RSI bands, and the 24h gate
   // when it is switched on.
+  const trendOn = preset.trendRequired.day || preset.trendRequired.hour || preset.trendRequired.halfHour;
   const checksTotal = (preset.shaRequired.day ? 1 : 0) + (preset.shaRequired.hour ? 1 : 0)
-    + (preset.shaRequired.halfHour ? 1 : 0) + 2 + (changeGate ? 1 : 0);
+    + (preset.shaRequired.halfHour ? 1 : 0)
+    + (preset.trendRequired.day ? 1 : 0) + (preset.trendRequired.hour ? 1 : 0)
+    + (preset.trendRequired.halfHour ? 1 : 0)
+    + 2 + (changeGate ? 1 : 0);
   const shaLabel = preset.shaBullish ? "SHA · GREEN" : "SHA · RED";
   const band = (range: [number, number]) =>
     preset.requireFalling ? `${range[1].toFixed(1)} → ${range[0].toFixed(1)} ↓` : `${range[0].toFixed(1)} — ${range[1].toFixed(1)}`;
@@ -429,8 +517,9 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
             <div className="eyebrow">{exchange.label} · {preset.label}</div>
             <h1>{preset.shaBullish ? <>Find alignment.<br />Before the crowd.</> : <>Catch the breakdown.<br />Before the bounce.</>}</h1>
             <p>
-              Scanning liquid {exchange.label} USDT pairs using closed candles. An exact signal needs the Smoothed
-              Heikin Ashi timeframes {preset.shaBullish ? "green" : "red"}, both RSI windows in band
+              Scanning liquid {exchange.label} USDT pairs using closed candles. An exact signal needs
+              {trendOn ? " 1D, 1H and 30m all trending up, " : " "}the Smoothed
+              Heikin Ashi timeframes {preset.shaBullish ? "green" : "red"}, the RSI conditions
               {preset.requireFalling ? " while still falling" : ""}
               {changeGate
                 ? `, and 24h change ${basePreset.change24h.min !== undefined ? `at or above +${basePreset.change24h.min}%` : `at or below ${basePreset.change24h.max}%`}.`
@@ -447,6 +536,12 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
         </section>
 
         <section className="rule-strip" aria-label="Active signal rules">
+          {trendOn && (
+            <div className="rule">
+              <div className="rule-k">Trend (EMA 50)</div>
+              <div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>1D · 1H · 30m</div>
+            </div>
+          )}
           <div className="rule"><div className="rule-k">1 Day</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
           <div className="rule">
             <div className="rule-k">1 Hour{preset.shaRequired.hour ? "" : " · optional"}</div>
@@ -456,7 +551,10 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
           </div>
           <div className="rule"><div className="rule-k">30 Minutes</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
           <div className="rule"><div className="rule-k">1H RSI (14)</div><div className="rule-v">{band(preset.rsi1h)}</div></div>
-          <div className="rule"><div className="rule-k">30m RSI (14)</div><div className="rule-v">{band(preset.rsi30m)}</div></div>
+          <div className="rule">
+            <div className="rule-k">30m RSI (14)</div>
+            <div className="rule-v">{preset.rsi30mLeads ? "> 1H RSI" : band(preset.rsi30m)}</div>
+          </div>
           <div className="rule">
             <div className="rule-k">24h change{changeGate ? "" : " · off"}</div>
             <div className={`rule-v ${changeGate ? (preset.shaBullish ? "green" : "red") : "muted"}`}>
@@ -531,10 +629,38 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
             </div>
           ) : (
             <table>
-              <thead><tr><th>Asset</th><th>Price</th><th>24H</th><th>Market cap</th><th>24H volume</th><th>1D SHA</th><th>1H SHA</th><th>30m SHA</th><th>1H RSI</th><th>30m RSI</th><th>Signal</th><th></th></tr></thead>
+              <thead>
+                <tr>
+                  {SORTABLE.map(({ key, label }) => (
+                    <th key={key}>
+                      <button className={`th-sort ${sort?.key === key ? "active" : ""}`} onClick={() => toggleSort(key)}>
+                        {label}
+                        <span className="th-arrow">{sort?.key === key ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+                      </button>
+                    </th>
+                  ))}
+                  <th>Trend</th><th>1D SHA</th><th>1H SHA</th><th>30m SHA</th>
+                  <th>
+                    <button className={`th-sort ${sort?.key === "rsi1h" ? "active" : ""}`} onClick={() => toggleSort("rsi1h")}>
+                      1H RSI<span className="th-arrow">{sort?.key === "rsi1h" ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className={`th-sort ${sort?.key === "rsi30m" ? "active" : ""}`} onClick={() => toggleSort("rsi30m")}>
+                      30m RSI<span className="th-arrow">{sort?.key === "rsi30m" ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className={`th-sort ${sort?.key === "score" ? "active" : ""}`} onClick={() => toggleSort("score")}>
+                      Signal<span className="th-arrow">{sort?.key === "score" ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+                    </button>
+                  </th>
+                  <th></th>
+                </tr>
+              </thead>
               <tbody>
                 {loading && !data ? Array.from({ length: 7 }, (_, index) => (
-                  <tr className="skeleton-row" key={index}>{Array.from({ length: 12 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
+                  <tr className="skeleton-row" key={index}>{Array.from({ length: 13 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
                 )) : visible.map((coin) => (
                   <Row key={coin.symbol} coin={coin} preset={preset} tradeUrl={exchange.tradeUrl} />
                 ))}
