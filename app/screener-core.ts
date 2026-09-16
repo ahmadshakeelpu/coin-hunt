@@ -36,11 +36,14 @@ export type CoinResult = {
   up1d: boolean;
   up1h: boolean;
   up30m: boolean;
+  rsi4hState: RsiState;
   rsi1hState: RsiState;
   rsi30mState: RsiState;
 };
 /** A coin with its RSI, direction and match recomputed against a live price. */
 export type EvaluatedCoin = CoinResult & {
+  rsi4h: number;
+  rsi4hFalling: boolean;
   rsi1h: number;
   rsi30m: number;
   rsi1hFalling: boolean;
@@ -104,7 +107,7 @@ export type Exchange = {
   /** REST bases tried in order. */
   hosts: string[];
   /** Interval names differ: MEXC has no "1h", it calls that "60m". */
-  intervals: { day: string; hour: string; halfHour: string };
+  intervals: { day: string; fourHour: string; hour: string; halfHour: string };
   /**
    * Base socket URL, or null when the exchange has no usable feed. Symbols are
    * subscribed after connecting rather than in the URL: 670 of them makes a
@@ -196,7 +199,7 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
       "https://data-api.binance.vision",
     ],
     apiPath: "/api/v3",
-    intervals: { day: "1d", hour: "1h", halfHour: "30m" },
+    intervals: { day: "1d", fourHour: "4h", hour: "1h", halfHour: "30m" },
     streamUrl: "wss://stream.binance.com:9443/stream",
     streamParams: (symbols) => symbols.map((symbol) => `${symbol.toLowerCase()}@ticker`),
     tradeUrl: (baseAsset) => `https://www.binance.com/en/trade/${baseAsset}_USDT?type=spot`,
@@ -214,7 +217,7 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     label: "Binance Futures",
     hosts: ["https://fapi.binance.com"],
     apiPath: "/fapi/v1",
-    intervals: { day: "1d", hour: "1h", halfHour: "30m" },
+    intervals: { day: "1d", fourHour: "4h", hour: "1h", halfHour: "30m" },
     // fstream.binance.com accepts the connection and acknowledges SUBSCRIBE,
     // then sends nothing: no frames arrived on @ticker, @miniTicker, @aggTrade
     // or @markPrice, while futures REST worked throughout. Live values come
@@ -239,7 +242,7 @@ export const EXCHANGES: Record<Exchange["key"], Exchange> = {
     label: "MEXC",
     hosts: ["https://api.mexc.com"],
     apiPath: "/api/v3",
-    intervals: { day: "1d", hour: "60m", halfHour: "30m" },
+    intervals: { day: "1d", fourHour: "4h", hour: "60m", halfHour: "30m" },
     // MEXC's socket connects from the browser but streams protobuf, not JSON,
     // so live values come from polling instead.
     streamUrl: null,
@@ -274,7 +277,7 @@ export const RSI_LENGTH = 14;
  * endpoint charges 1 below 100 and 2 above, on a 2400/min budget).
  */
 const KLINE_LIMIT = 100;
-const SCAN_CACHE_VERSION = 4;
+const SCAN_CACHE_VERSION = 5;
 const EXCLUDED_BASES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BRL", "GBP", "UAH", "BIDR", "AEUR"]);
 
 export async function requestJson<T>(url: string): Promise<T> {
@@ -389,8 +392,10 @@ export function evaluate(
   price: number,
   change24h: number = coin.change24h,
 ): EvaluatedCoin {
+  const rsi4h = projectRsi(coin.rsi4hState, price);
   const rsi1h = projectRsi(coin.rsi1hState, price);
   const rsi30m = projectRsi(coin.rsi30mState, price);
+  const rsi4hFalling = rsi4h < coin.rsi4hState.closed;
   const rsi1hFalling = rsi1h < coin.rsi1hState.closed;
   const rsi30mFalling = rsi30m < coin.rsi30mState.closed;
   const checks: boolean[] = [];
@@ -414,7 +419,7 @@ export function evaluate(
   return {
     ...coin,
     change24h,
-    rsi1h, rsi30m, rsi1hFalling, rsi30mFalling,
+    rsi4h, rsi4hFalling, rsi1h, rsi30m, rsi1hFalling, rsi30mFalling,
     match: checks.every(Boolean),
     score: checks.filter(Boolean).length,
     total: checks.length,
@@ -425,6 +430,7 @@ const INTERVAL_MS: Record<string, number> = {
   "30m": 30 * 60_000,
   "60m": 60 * 60_000,
   "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
   "1d": 24 * 60 * 60_000,
 };
 
@@ -440,7 +446,7 @@ const bucketOf = (interval: string) => Math.floor(Date.now() / (INTERVAL_MS[inte
 
 type CachedScan = {
   version: number;
-  buckets: [number, number, number];
+  buckets: [number, number, number, number];
   coins: Array<Omit<CoinResult, "price" | "change24h" | "quoteVolume">>;
 };
 
@@ -459,8 +465,9 @@ function loadCachedScan(exchange: Exchange): Map<string, CachedScan["coins"][num
     if (!raw) return empty;
     const cached = JSON.parse(raw) as CachedScan;
     if (cached.version !== SCAN_CACHE_VERSION) return empty;
-    const current: [number, number, number] = [
+    const current: [number, number, number, number] = [
       bucketOf(exchange.intervals.day),
+      bucketOf(exchange.intervals.fourHour),
       bucketOf(exchange.intervals.hour),
       bucketOf(exchange.intervals.halfHour),
     ];
@@ -478,6 +485,7 @@ function saveCachedScan(exchange: Exchange, coins: CoinResult[]) {
       version: SCAN_CACHE_VERSION,
       buckets: [
         bucketOf(exchange.intervals.day),
+        bucketOf(exchange.intervals.fourHour),
         bucketOf(exchange.intervals.hour),
         bucketOf(exchange.intervals.halfHour),
       ],
@@ -676,8 +684,9 @@ export async function runScan(
       const reusable = cached.get(ticker.symbol);
       if (reusable) return { ...reusable, ...live };
 
-      const [day, hour, halfHour] = await Promise.all([
+      const [day, fourHour, hour, halfHour] = await Promise.all([
         fetchKlines(exchange, host, ticker.symbol, exchange.intervals.day),
+        fetchKlines(exchange, host, ticker.symbol, exchange.intervals.fourHour),
         fetchKlines(exchange, host, ticker.symbol, exchange.intervals.hour),
         fetchKlines(exchange, host, ticker.symbol, exchange.intervals.halfHour),
       ]);
@@ -691,6 +700,7 @@ export async function runScan(
         up1d: isUptrend(day),
         up1h: isUptrend(hour),
         up30m: isUptrend(halfHour),
+        rsi4hState: rsiState(fourHour),
         rsi1hState: rsiState(hour),
         rsi30mState: rsiState(halfHour),
       };

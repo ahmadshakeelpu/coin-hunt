@@ -30,7 +30,7 @@ const VISIBLE_ROWS = 150;
  */
 const REORDER_INTERVAL_MS = 2000;
 
-type SortKey = "asset" | "price" | "change24h" | "marketCap" | "quoteVolume" | "rsi1h" | "rsi30m" | "score";
+type SortKey = "asset" | "price" | "change24h" | "marketCap" | "quoteVolume" | "rsi4h" | "rsi1h" | "rsi30m" | "score";
 
 const SORTABLE: Array<{ key: SortKey; label: string }> = [
   { key: "asset", label: "Asset" },
@@ -77,13 +77,15 @@ function Candle({ bull }: { bull: boolean }) {
 }
 
 function Rsi({ value, band, falling, requireFalling, leads }: {
-  value: number; band: [number, number]; falling: boolean; requireFalling: boolean;
+  value: number; falling: boolean;
+  /** Omitted for readings that are shown for context but gate nothing. */
+  band?: [number, number]; requireFalling?: boolean;
   /** When set, the cell is judged on leading the 1H reading rather than a band. */
   leads?: boolean;
 }) {
-  const ok = leads === undefined
-    ? value >= band[0] && value <= band[1] && (!requireFalling || falling)
-    : leads;
+  const ok = leads !== undefined
+    ? leads
+    : band !== undefined && value >= band[0] && value <= band[1] && (!requireFalling || falling);
   // The arrow shows on both presets. Only bearish requires the direction, but
   // knowing whether a bullish reading is climbing into its band or falling out
   // of it is the whole point of watching it live.
@@ -114,6 +116,7 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
       <td className="mono">{formatUsd(coin.quoteVolume)}</td>
       <td><Trend day={coin.up1d} hour={coin.up1h} halfHour={coin.up30m} /></td>
       <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
+      <td><Rsi value={coin.rsi4h} falling={coin.rsi4hFalling} /></td>
       <td><Rsi value={coin.rsi1h} band={preset.rsi1h} falling={coin.rsi1hFalling} requireFalling={preset.requireFalling} /></td>
       <td>
         <Rsi
@@ -140,6 +143,8 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
     a.change24h === b.change24h &&
     a.quoteVolume === b.quoteVolume &&
     a.marketCap === b.marketCap &&
+    a.rsi4h === b.rsi4h &&
+    a.rsi4hFalling === b.rsi4hFalling &&
     a.rsi1h === b.rsi1h &&
     a.rsi30m === b.rsi30m &&
     a.up1d === b.up1d &&
@@ -641,6 +646,11 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
                   ))}
                   <th>Trend</th><th>1D SHA</th><th>1H SHA</th><th>30m SHA</th>
                   <th>
+                    <button className={`th-sort ${sort?.key === "rsi4h" ? "active" : ""}`} onClick={() => toggleSort("rsi4h")}>
+                      4H RSI<span className="th-arrow">{sort?.key === "rsi4h" ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+                    </button>
+                  </th>
+                  <th>
                     <button className={`th-sort ${sort?.key === "rsi1h" ? "active" : ""}`} onClick={() => toggleSort("rsi1h")}>
                       1H RSI<span className="th-arrow">{sort?.key === "rsi1h" ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
                     </button>
@@ -660,7 +670,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
               </thead>
               <tbody>
                 {loading && !data ? Array.from({ length: 7 }, (_, index) => (
-                  <tr className="skeleton-row" key={index}>{Array.from({ length: 13 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
+                  <tr className="skeleton-row" key={index}>{Array.from({ length: 14 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
                 )) : visible.map((coin) => (
                   <Row key={coin.symbol} coin={coin} preset={preset} tradeUrl={exchange.tradeUrl} />
                 ))}

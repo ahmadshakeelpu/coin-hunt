@@ -43,6 +43,11 @@ timeframe's state.
 The 30m RSI has no fixed band on the bullish preset: it only has to sit above
 the 1H reading, which is momentum accelerating into the shorter timeframe.
 
+**4H RSI is shown but gates nothing.** It is computed and projected live like
+the others, with its own direction arrow and a sortable column, so the higher
+timeframe is visible alongside the two that decide the match. Give it a band in
+`PRESETS` if it should become a condition.
+
 A bullish coin can therefore be an exact match with 1H SHA still red. The column
 still shows it, and the rule strip labels it "optional", but it is not one of the
 five checks. Bearish requires all three SHA timeframes, so it scores out of six.
