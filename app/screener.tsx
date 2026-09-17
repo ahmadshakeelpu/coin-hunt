@@ -76,16 +76,18 @@ function Candle({ bull }: { bull: boolean }) {
   return <span className={`candle ${bull ? "bull" : "bear"}`}><i />{bull ? "Green" : "Red"}</span>;
 }
 
-function Rsi({ value, band, falling, requireFalling, leads }: {
+function Rsi({ value, band, falling, direction, leads }: {
   value: number; falling: boolean;
   /** Omitted for readings that are shown for context but gate nothing. */
-  band?: [number, number]; requireFalling?: boolean;
+  band?: [number, number];
+  direction?: "rising" | "falling" | null;
   /** When set, the cell is judged on leading the 1H reading rather than a band. */
   leads?: boolean;
 }) {
+  const directionOk = !direction || (direction === "falling" ? falling : !falling);
   const ok = leads !== undefined
     ? leads
-    : band !== undefined && value >= band[0] && value <= band[1] && (!requireFalling || falling);
+    : band !== undefined && value >= band[0] && value <= band[1] && directionOk;
   // The arrow shows on both presets. Only bearish requires the direction, but
   // knowing whether a bullish reading is climbing into its band or falling out
   // of it is the whole point of watching it live.
@@ -115,16 +117,17 @@ const Row = memo(function Row({ coin, preset, tradeUrl }: {
       <td className="mono">{formatUsd(coin.marketCap)}</td>
       <td className="mono">{formatUsd(coin.quoteVolume)}</td>
       <td><Trend day={coin.up1d} hour={coin.up1h} halfHour={coin.up30m} /></td>
-      <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
+      <td><Candle bull={coin.sha1d} /></td><td><Candle bull={coin.sha4h} /></td>
+      <td><Candle bull={coin.sha1h} /></td><td><Candle bull={coin.sha30m} /></td>
       <td><Rsi value={coin.rsi4h} falling={coin.rsi4hFalling} /></td>
-      <td><Rsi value={coin.rsi1h} band={preset.rsi1h} falling={coin.rsi1hFalling} requireFalling={preset.requireFalling} /></td>
+      <td><Rsi value={coin.rsi1h} band={preset.rsi1h} falling={coin.rsi1hFalling} direction={preset.rsiDirection} /></td>
       <td>
         <Rsi
           value={coin.rsi30m}
           band={preset.rsi30m}
           falling={coin.rsi30mFalling}
-          requireFalling={preset.requireFalling}
-          leads={preset.rsi30mLeads ? coin.rsi30m > coin.rsi1h : undefined}
+          direction={preset.rsiDirection}
+          leads={preset.rsi30mLeads ? (preset.shaBullish ? coin.rsi30m > coin.rsi1h : coin.rsi30m < coin.rsi1h) : undefined}
         />
       </td>
       <td><span className={coin.match ? "match-badge" : "near-badge"}>{coin.match ? "Exact match" : `${coin.score}/${coin.total} aligned`}</span></td>
@@ -477,14 +480,18 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
   // Three SHA slots (1H optional on bullish), two RSI bands, and the 24h gate
   // when it is switched on.
   const trendOn = preset.trendRequired.day || preset.trendRequired.hour || preset.trendRequired.halfHour;
-  const checksTotal = (preset.shaRequired.day ? 1 : 0) + (preset.shaRequired.hour ? 1 : 0)
-    + (preset.shaRequired.halfHour ? 1 : 0)
+  const checksTotal = (preset.shaRequired.day ? 1 : 0) + (preset.shaRequired.fourHour ? 1 : 0)
+    + (preset.shaRequired.hour ? 1 : 0) + (preset.shaRequired.halfHour ? 1 : 0)
     + (preset.trendRequired.day ? 1 : 0) + (preset.trendRequired.hour ? 1 : 0)
     + (preset.trendRequired.halfHour ? 1 : 0)
     + 2 + (changeGate ? 1 : 0);
   const shaLabel = preset.shaBullish ? "SHA · GREEN" : "SHA · RED";
   const band = (range: [number, number]) =>
-    preset.requireFalling ? `${range[1].toFixed(1)} → ${range[0].toFixed(1)} ↓` : `${range[0].toFixed(1)} — ${range[1].toFixed(1)}`;
+    preset.rsiDirection === "falling"
+      ? `${range[1].toFixed(1)} → ${range[0].toFixed(1)} ↓`
+      : preset.rsiDirection === "rising"
+        ? `${range[0].toFixed(1)} → ${range[1].toFixed(1)} ↑`
+        : `${range[0].toFixed(1)} — ${range[1].toFixed(1)}`;
 
   return (
     <div className="app-shell">
@@ -525,7 +532,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
               Scanning liquid {exchange.label} USDT pairs using closed candles. An exact signal needs
               {trendOn ? " 1D, 1H and 30m all trending up, " : " "}the Smoothed
               Heikin Ashi timeframes {preset.shaBullish ? "green" : "red"}, the RSI conditions
-              {preset.requireFalling ? " while still falling" : ""}
+              {preset.rsiDirection ? ` while ${preset.rsiDirection}` : ""}
               {changeGate
                 ? `, and 24h change ${basePreset.change24h.min !== undefined ? `at or above +${basePreset.change24h.min}%` : `at or below ${basePreset.change24h.max}%`}.`
                 : ". The 24h change condition is currently switched off."}
@@ -547,18 +554,23 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
               <div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>1D · 1H · 30m</div>
             </div>
           )}
-          <div className="rule"><div className="rule-k">1 Day</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
-          <div className="rule">
-            <div className="rule-k">1 Hour{preset.shaRequired.hour ? "" : " · optional"}</div>
-            <div className={`rule-v ${preset.shaRequired.hour ? (preset.shaBullish ? "green" : "red") : "muted"}`}>
-              {preset.shaRequired.hour ? shaLabel : "SHA · ANY"}
-            </div>
-          </div>
-          <div className="rule"><div className="rule-k">30 Minutes</div><div className={`rule-v ${preset.shaBullish ? "green" : "red"}`}>{shaLabel}</div></div>
+          {([["1 Day", preset.shaRequired.day], ["4 Hour", preset.shaRequired.fourHour],
+             ["1 Hour", preset.shaRequired.hour], ["30 Minutes", preset.shaRequired.halfHour]] as const).map(
+            ([label, required]) => (
+              <div className="rule" key={label}>
+                <div className="rule-k">{label}{required ? "" : " · optional"}</div>
+                <div className={`rule-v ${required ? (preset.shaBullish ? "green" : "red") : "muted"}`}>
+                  {required ? shaLabel : "SHA · ANY"}
+                </div>
+              </div>
+            ),
+          )}
           <div className="rule"><div className="rule-k">1H RSI (14)</div><div className="rule-v">{band(preset.rsi1h)}</div></div>
           <div className="rule">
             <div className="rule-k">30m RSI (14)</div>
-            <div className="rule-v">{preset.rsi30mLeads ? "> 1H RSI" : band(preset.rsi30m)}</div>
+            <div className="rule-v">
+              {preset.rsi30mLeads ? (preset.shaBullish ? "> 1H RSI" : "< 1H RSI") : band(preset.rsi30m)}
+            </div>
           </div>
           <div className="rule">
             <div className="rule-k">24h change{changeGate ? "" : " · off"}</div>
@@ -644,7 +656,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
                       </button>
                     </th>
                   ))}
-                  <th>Trend</th><th>1D SHA</th><th>1H SHA</th><th>30m SHA</th>
+                  <th>Trend</th><th>1D SHA</th><th>4H SHA</th><th>1H SHA</th><th>30m SHA</th>
                   <th>
                     <button className={`th-sort ${sort?.key === "rsi4h" ? "active" : ""}`} onClick={() => toggleSort("rsi4h")}>
                       4H RSI<span className="th-arrow">{sort?.key === "rsi4h" ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
@@ -670,7 +682,7 @@ export function Screener({ exchangeKey, presetKey }: { exchangeKey: Exchange["ke
               </thead>
               <tbody>
                 {loading && !data ? Array.from({ length: 7 }, (_, index) => (
-                  <tr className="skeleton-row" key={index}>{Array.from({ length: 14 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
+                  <tr className="skeleton-row" key={index}>{Array.from({ length: 15 }, (_, cell) => <td key={cell}><div className="shimmer" /></td>)}</tr>
                 )) : visible.map((coin) => (
                   <Row key={coin.symbol} coin={coin} preset={preset} tradeUrl={exchange.tradeUrl} />
                 ))}

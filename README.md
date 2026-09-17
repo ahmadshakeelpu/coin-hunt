@@ -27,40 +27,45 @@ A pair is an exact match when all five conditions hold on closed candles.
 | Timeframe | Condition |
 | --- | --- |
 | 1 day / 1 hour / 30 min | **Uptrend** — price above EMA(50) and that EMA rising |
-| 1 day | Smoothed Heikin Ashi green |
-| 1 hour | Smoothed Heikin Ashi — **advisory, does not gate the match** |
-| 30 min | Smoothed Heikin Ashi green |
-| 1 hour | RSI(14) between 53 and 56 |
+| 1 day / 4 hour / 1 hour | Smoothed Heikin Ashi green |
+| 30 min | Smoothed Heikin Ashi — **advisory, does not gate the match** |
+| 1 hour | RSI(14) between 53 and 56 **and rising** |
 | 30 min | RSI(14) **above the 1H RSI** — the shorter timeframe leading |
 | 24h | Price change **at or above +7%** |
 
-Eight checks in total. "Uptrend" is deliberately separate from Smoothed Heikin
+Nine checks in total. "Uptrend" is deliberately separate from Smoothed Heikin
 Ashi: SHA is a smoothed candle-colour signal, while this is a position-and-slope
 test against a 50-period EMA. Both have to hold, so a coin popping above a flat
 or falling average does not read as trending. The Trend column shows each
 timeframe's state.
 
-The 30m RSI has no fixed band on the bullish preset: it only has to sit above
-the 1H reading, which is momentum accelerating into the shorter timeframe.
+The 30m RSI has no fixed band on either preset: it only has to lead the 1H
+reading in the preset's direction, which is momentum accelerating into the
+shorter timeframe. A flat RSI counts as holding its direction rather than
+failing both ways.
 
 **4H RSI is shown but gates nothing.** It is computed and projected live like
 the others, with its own direction arrow and a sortable column, so the higher
 timeframe is visible alongside the two that decide the match. Give it a band in
 `PRESETS` if it should become a condition.
 
-A bullish coin can therefore be an exact match with 1H SHA still red. The column
-still shows it, and the rule strip labels it "optional", but it is not one of the
-five checks. Bearish requires all three SHA timeframes, so it scores out of six.
+Both presets gate on 1D, 4H and 1H SHA. The 30m column is still shown and
+labelled "optional" in the rule strip, but it no longer decides a match.
 
-**Bearish** — unchanged; only the bullish rules were respecified, so bearish has
-no trend gate and keeps its fixed 30m band.
+**Bearish** — same SHA and RSI shape, mirrored. It has no EMA trend gate; only
+the bullish rules asked for one.
 
 | Timeframe | Condition |
 | --- | --- |
-| 1 day / 1 hour / 30 min | Smoothed Heikin Ashi red |
+| 1 day / 4 hour / 1 hour | Smoothed Heikin Ashi red |
+| 30 min | Smoothed Heikin Ashi — advisory, does not gate the match |
 | 1 hour | RSI(14) between 44 and 47 **and falling** |
-| 30 min | RSI(14) between 42 and 44 **and falling** |
+| 30 min | RSI(14) **below the 1H RSI** — leading downward |
 | 24h | Price change **at or below −7%** |
+
+Six checks in total. The two presets mirror each other: the 30m RSI has to lead
+the 1H one in the preset's own direction, above it when bullish and below it
+when bearish.
 
 "Falling" compares the live RSI against the last closed candle's, so it tracks
 the market rather than the last sweep. **Both presets show a ↓ or ↑** next to

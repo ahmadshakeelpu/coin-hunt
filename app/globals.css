@@ -96,7 +96,7 @@ h1 { font-size: clamp(38px, 5.5vw, 76px); line-height: .95; letter-spacing: -.07
 @keyframes bell-in { 0% { transform: scale(.94); } 60% { transform: scale(1.04); } }
 
 .table-wrap { border: 1px solid var(--line); border-radius: 13px; overflow-x: auto; background: rgba(16,20,17,.72); }
-table { width: 100%; border-collapse: collapse; min-width: 1380px; }
+table { width: 100%; border-collapse: collapse; min-width: 1500px; }
 th {
   padding: 13px 18px; color: #687068; font-size: 9px; letter-spacing: .11em; text-transform: uppercase;
   font-weight: 600; text-align: left; background: #0d100e; border-bottom: 1px solid var(--line);

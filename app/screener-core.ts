@@ -31,6 +31,7 @@ export type CoinResult = {
   change24h: number;
   quoteVolume: number;
   sha1d: boolean;
+  sha4h: boolean;
   sha1h: boolean;
   sha30m: boolean;
   up1d: boolean;
@@ -77,14 +78,17 @@ export type Preset = {
   shaBullish: boolean;
   rsi1h: [number, number];
   rsi30m: [number, number];
-  /** Bearish also requires RSI to be declining, not merely inside the band. */
-  requireFalling: boolean;
+  /**
+   * Direction the 1H RSI must be travelling: bullish wants it climbing into its
+   * band, bearish wants it dropping through. null leaves direction unchecked.
+   */
+  rsiDirection: "rising" | "falling" | null;
   /**
    * Which SHA timeframes gate the match. 1H is advisory on the bullish preset:
    * it is still shown, and still scored, but a red 1H no longer stops a coin
    * being an exact match when everything else lines up.
    */
-  shaRequired: { day: boolean; hour: boolean; halfHour: boolean };
+  shaRequired: { day: boolean; fourHour: boolean; hour: boolean; halfHour: boolean };
   /**
    * Required 24h price change, in percent. Bullish sets a floor, bearish a
    * ceiling. Evaluated live, since 24h change moves with the stream.
@@ -93,8 +97,8 @@ export type Preset = {
   /** Timeframes that must be trending in the preset's direction. */
   trendRequired: { day: boolean; hour: boolean; halfHour: boolean };
   /**
-   * Require the 30m RSI to sit above the 1H RSI, i.e. the shorter timeframe
-   * leading the longer one. Used instead of a fixed 30m band.
+   * Require the 30m RSI to lead the 1H one in the preset's direction: above it
+   * when bullish, below it when bearish. Used instead of a fixed 30m band.
    */
   rsi30mLeads: boolean;
 };
@@ -148,8 +152,8 @@ export const PRESETS: Record<Preset["key"], Preset> = {
     shaBullish: true,
     rsi1h: [53, 56],
     rsi30m: [56, 58],
-    requireFalling: false,
-    shaRequired: { day: true, hour: false, halfHour: true },
+    rsiDirection: "rising",
+    shaRequired: { day: true, fourHour: true, hour: true, halfHour: false },
     change24h: { min: 7 },
     trendRequired: { day: true, hour: true, halfHour: true },
     rsi30mLeads: true,
@@ -160,13 +164,12 @@ export const PRESETS: Record<Preset["key"], Preset> = {
     shaBullish: false,
     rsi1h: [44, 47],
     rsi30m: [42, 44],
-    requireFalling: true,
-    shaRequired: { day: true, hour: true, halfHour: true },
+    rsiDirection: "falling",
+    shaRequired: { day: true, fourHour: true, hour: true, halfHour: false },
     change24h: { max: -7 },
-    // Bearish keeps its fixed 30m band and has no trend gate; only the bullish
-    // rules were respecified.
+    // No trend gate on bearish; only the bullish rules asked for one.
     trendRequired: { day: false, hour: false, halfHour: false },
-    rsi30mLeads: false,
+    rsi30mLeads: true,
   },
 };
 
@@ -277,7 +280,7 @@ export const RSI_LENGTH = 14;
  * endpoint charges 1 below 100 and 2 above, on a 2400/min budget).
  */
 const KLINE_LIMIT = 100;
-const SCAN_CACHE_VERSION = 5;
+const SCAN_CACHE_VERSION = 6;
 const EXCLUDED_BASES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BRL", "GBP", "UAH", "BIDR", "AEUR"]);
 
 export async function requestJson<T>(url: string): Promise<T> {
@@ -398,18 +401,25 @@ export function evaluate(
   const rsi4hFalling = rsi4h < coin.rsi4hState.closed;
   const rsi1hFalling = rsi1h < coin.rsi1hState.closed;
   const rsi30mFalling = rsi30m < coin.rsi30mState.closed;
+  // Rising is "not falling": a flat reading counts as holding its direction
+  // rather than failing both ways.
+  const directionOk = (falling: boolean) =>
+    preset.rsiDirection === null ? true : preset.rsiDirection === "falling" ? falling : !falling;
+
   const checks: boolean[] = [];
   if (preset.shaRequired.day) checks.push(coin.sha1d === preset.shaBullish);
+  if (preset.shaRequired.fourHour) checks.push(coin.sha4h === preset.shaBullish);
   if (preset.shaRequired.hour) checks.push(coin.sha1h === preset.shaBullish);
   if (preset.shaRequired.halfHour) checks.push(coin.sha30m === preset.shaBullish);
   if (preset.trendRequired.day) checks.push(coin.up1d === preset.shaBullish);
   if (preset.trendRequired.hour) checks.push(coin.up1h === preset.shaBullish);
   if (preset.trendRequired.halfHour) checks.push(coin.up30m === preset.shaBullish);
-  checks.push(inBand(rsi1h, preset.rsi1h) && (!preset.requireFalling || rsi1hFalling));
+  checks.push(inBand(rsi1h, preset.rsi1h) && directionOk(rsi1hFalling));
   checks.push(
     preset.rsi30mLeads
-      ? rsi30m > rsi1h
-      : inBand(rsi30m, preset.rsi30m) && (!preset.requireFalling || rsi30mFalling),
+      ? // The shorter timeframe must be ahead in the preset's direction.
+        (preset.shaBullish ? rsi30m > rsi1h : rsi30m < rsi1h)
+      : inBand(rsi30m, preset.rsi30m) && directionOk(rsi30mFalling),
   );
   // Empty bounds mean the gate is switched off, so it drops out of the score
   // entirely rather than counting as a free pass.
@@ -695,6 +705,7 @@ export async function runScan(
         baseAsset: info.baseAsset,
         ...live,
         sha1d: smoothedHeikinAshiBullish(day),
+        sha4h: smoothedHeikinAshiBullish(fourHour),
         sha1h: smoothedHeikinAshiBullish(hour),
         sha30m: smoothedHeikinAshiBullish(halfHour),
         up1d: isUptrend(day),
